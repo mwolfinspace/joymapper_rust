@@ -7,7 +7,7 @@ use rfd::FileDialog;
 use rodio::{OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use winreg::enums::*;
@@ -202,6 +202,24 @@ fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) 
     }
 }
 
+fn query_battery(index: u32) -> (u8, u8) {
+    unsafe {
+        use windows_sys::Win32::UI::Input::XboxController::*;
+        let mut info: XINPUT_BATTERY_INFORMATION = std::mem::zeroed();
+        let result = XInputGetBatteryInformation(index, BATTERY_DEVTYPE_GAMEPAD, &mut info);
+        if result == 0 {
+            (info.BatteryType, info.BatteryLevel)
+        } else {
+            (0xFF, 0)
+        }
+    }
+}
+
+const BATTERY_DISCONNECTED: u8 = 0xFF;
+const BATTERY_WIRED: u8 = 0x00;
+const BATTERY_ALKALINE: u8 = 0x01;
+const BATTERY_NIMH: u8 = 0x02;
+
 // Extract the raw bitmap data (BITMAPINFOHEADER + XOR mask + AND mask) for
 fn extract_icon_data(ico_bytes: &[u8]) -> Option<&[u8]> {
     if ico_bytes.len() < 6 {
@@ -279,6 +297,8 @@ enum AppTheme {
 struct Profile {
     #[serde(default)]
     last_used: bool,
+    #[serde(default)]
+    total_key_presses: u64,
     mappings: HashMap<String, Vec<String>>,
 }
 
@@ -293,6 +313,7 @@ impl From<OldProfile> for Profile {
     fn from(old: OldProfile) -> Self {
         Profile {
             last_used: old.last_used,
+            total_key_presses: 0,
             mappings: old.mappings.into_iter().map(|(k, v)| (k, vec![v])).collect(),
         }
     }
@@ -333,6 +354,9 @@ struct AppState {
     sound_enabled_atomic: Arc<AtomicBool>,
     rename_target: Option<String>,
     rename_buffer: String,
+    key_press_counter: Arc<AtomicU64>,
+    connection_start: Arc<Mutex<std::time::Instant>>,
+    battery_info: Arc<Mutex<(u8, u8)>>,
 }
 
 impl AppState {
@@ -359,6 +383,7 @@ impl AppState {
         if let Some(profile) = self.profiles.get(current_name) {
             let mut profile = profile.clone();
             profile.last_used = true;
+            profile.total_key_presses = self.key_press_counter.load(Ordering::Relaxed);
             if let Ok(json) = serde_json::to_string_pretty(&profile) {
                 let _ = std::fs::write(self.profile_path(), json);
             }
@@ -617,6 +642,12 @@ struct JoyMapperApp {
     sound_engine: SoundEngine,
 }
 
+impl Drop for JoyMapperApp {
+    fn drop(&mut self) {
+        self.state.save_to_disk();
+    }
+}
+
 impl JoyMapperApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let tray_hicon = init_tray_icon();
@@ -720,15 +751,27 @@ impl JoyMapperApp {
         let sound_enabled = Arc::new(AtomicBool::new(true));
         let sound_enabled_poll = sound_enabled.clone();
 
+        let key_press_counter = Arc::new(AtomicU64::new(
+            profiles.get(&current_profile_name).map_or(0, |p| p.total_key_presses),
+        ));
+        let key_counter_poll = key_press_counter.clone();
+
+        let connection_start = Arc::new(Mutex::new(std::time::Instant::now()));
+        let connection_start_poll = connection_start.clone();
+
+        let battery_info = Arc::new(Mutex::new((0xFFu8, 0u8)));
+        let battery_info_poll = battery_info.clone();
+
         // Hardware Polling Thread (Full XInput coverage)
         std::thread::spawn(move || {
             unsafe {
                 windows_sys::Win32::Media::timeBeginPeriod(1);
             }
 
-            let poll_interval = Duration::from_millis(4);
+            let poll_interval = Duration::from_millis(1);
             let mut was_connected = false;
             let mut last_tray_update = std::time::Instant::now();
+            let mut last_battery_query = std::time::Instant::now();
             let click_tx = click_tx;
             let sound_enabled = sound_enabled_poll;
             loop {
@@ -737,9 +780,18 @@ impl JoyMapperApp {
                 if connected != was_connected {
                     *connected_clone.lock().unwrap() = connected;
                     was_connected = connected;
+                    if connected {
+                        *connection_start_poll.lock().unwrap() = std::time::Instant::now();
+                    }
                     update_tray_icon(if connected { "ready" } else { "disconnected" });
                     last_tray_update = std::time::Instant::now();
                     ctx_clone.request_repaint();
+                }
+
+                if connected && last_battery_query.elapsed() > Duration::from_secs(5) {
+                    let (btype, blevel) = query_battery(0);
+                    *battery_info_poll.lock().unwrap() = (btype, blevel);
+                    last_battery_query = std::time::Instant::now();
                 }
 
                 if connected {
@@ -792,6 +844,7 @@ impl JoyMapperApp {
                                         for part in key_str.split('+') {
                                             if let Some(vk) = parse_key_string(part) {
                                                 simulate_key(vk, false);
+                                                key_counter_poll.fetch_add(1, Ordering::Relaxed);
                                             }
                                         }
                                     }
@@ -854,6 +907,9 @@ impl JoyMapperApp {
                 sound_enabled_atomic: sound_enabled,
                 rename_target: None,
                 rename_buffer: String::new(),
+                key_press_counter,
+                connection_start,
+                battery_info,
             },
             tray_hicon,
             sound_engine,
@@ -1477,12 +1533,53 @@ impl eframe::App for JoyMapperApp {
                                 .inner_margin(12.0)
                                 .show(ui, |ui| {
                                     if connected {
-                                        ui.colored_label(Color32::from_rgb(0, 200, 100), "Connected  \u{25CF}  Controller active via XInput");
-                                        ui.small("Listening for button events at 60 Hz.");
+                                        ui.colored_label(Color32::from_rgb(0, 200, 100), "Connected  \u{2022}  Controller active via XInput");
+                                        ui.small("Controller 0  |  Polling at 1000 Hz  |  XInput engine");
+                                        let elapsed = self.state.connection_start.lock().unwrap().elapsed();
+                                        let secs = elapsed.as_secs();
+                                        let mins = secs / 60;
+                                        let hrs = mins / 60;
+                                        if hrs > 0 {
+                                            ui.small(format!("Connected for {}h {}m {}s", hrs, mins % 60, secs % 60));
+                                        } else if mins > 0 {
+                                            ui.small(format!("Connected for {}m {}s", mins, secs % 60));
+                                        } else {
+                                            ui.small(format!("Connected for {}s", secs));
+                                        }
+                                        let (btype, blevel) = *self.state.battery_info.lock().unwrap();
+                                        if btype == BATTERY_WIRED {
+                                            ui.colored_label(Color32::from_rgb(180, 180, 220), "Power: Wired");
+                                        } else if btype == BATTERY_DISCONNECTED {
+                                            ui.colored_label(Color32::from_rgb(180, 180, 180), "Battery: Disconnected");
+                                        } else if btype == BATTERY_ALKALINE || btype == BATTERY_NIMH {
+                                            let kind = if btype == BATTERY_NIMH { "NiMH" } else { "Alkaline" };
+                                            let (color, level_str) = match blevel {
+                                                0 => (Color32::from_rgb(220, 60, 60), "Empty"),
+                                                1 => (Color32::from_rgb(220, 160, 40), "Low"),
+                                                2 => (Color32::from_rgb(180, 200, 60), "Medium"),
+                                                _ => (Color32::from_rgb(0, 200, 100), "Full"),
+                                            };
+                                            ui.colored_label(color, format!("Battery: {} ({})", level_str, kind));
+                                        } else {
+                                            ui.colored_label(Color32::from_rgb(180, 180, 180), "Battery: Unknown");
+                                        }
                                     } else {
-                                        ui.colored_label(Color32::from_rgb(220, 60, 60), "Disconnected  \u{25CF}  No controller detected");
+                                        ui.colored_label(Color32::from_rgb(220, 60, 60), "Disconnected  \u{2022}  No controller detected");
                                         ui.small("Plug in an XInput controller to begin.");
                                     }
+                                });
+
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new("Statistics").strong());
+                            ui.add_space(4.0);
+                            egui::Frame::none()
+                                .fill(if is_dark { Color32::from_rgba_unmultiplied(20, 20, 25, 200) } else { Color32::from_rgba_unmultiplied(220, 220, 225, 200) })
+                                .rounding(8.0)
+                                .inner_margin(12.0)
+                                .show(ui, |ui| {
+                                    let count = self.state.key_press_counter.load(Ordering::Relaxed);
+                                    ui.label(format!("Total key presses recorded: {}", count));
+                                    ui.small("Counter is saved to profile on exit.");
                                 });
                         });
                     }
