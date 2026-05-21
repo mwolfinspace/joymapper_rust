@@ -1185,20 +1185,30 @@ impl eframe::App for JoyMapperApp {
                             ALL_INPUTS.iter().map(|name| *lock.get(*name).unwrap_or(&false)).collect()
                         };
                         let recording_name = self.state.recording_key.clone();
+                        let recording_slot = self.state.recording_slot;
 
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             for (row_idx, input_name) in ALL_INPUTS.iter().enumerate() {
                                 let is_pressed = pressed_mask[row_idx];
 
+                                if is_pressed {
+                                    let row_top = ui.cursor().min.y;
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_max(egui::pos2(0.0, row_top), egui::pos2(ui.available_width(), row_top + 28.0)),
+                                        egui::Rounding::same(4.0),
+                                        Color32::from_rgba_unmultiplied(0, 120, 200, 30),
+                                    );
+                                }
+
                                 ui.horizontal(|ui| {
-                                    // Column 1: Controller Button Identifier
-                                    ui.allocate_ui(egui::vec2(110.0, 24.0), |ui| {
-                                        let mut text = egui::RichText::new(*input_name).strong();
-                                        if is_pressed {
-                                            text = text.color(Color32::from_rgb(0, 200, 255));
-                                        }
-                                        ui.label(text);
-                                    });
+                                        // Column 1: Controller Button Identifier
+                                        ui.allocate_ui(egui::vec2(110.0, 24.0), |ui| {
+                                            let mut text = egui::RichText::new(*input_name).strong();
+                                            if is_pressed {
+                                                text = text.color(Color32::from_rgb(0, 200, 255));
+                                            }
+                                            ui.label(text);
+                                        });
 
                                     // Column 2: Multi-key cells with auto-wrap
                                     let key_slots = self.state.profiles.get_mut(&self.state.current_profile_name)
@@ -1214,7 +1224,7 @@ impl eframe::App for JoyMapperApp {
                                             let current_val = &key_slots[idx];
                                             let display = get_display_name(current_val);
 
-                                            let is_recording = recording_name.as_deref() == Some(*input_name);
+                                            let is_recording = recording_name.as_deref() == Some(*input_name) && recording_slot == Some(idx);
                                             let button_color = if is_recording {
                                                 Color32::from_rgb(220, 120, 0)
                                             } else if current_val.is_empty() {
