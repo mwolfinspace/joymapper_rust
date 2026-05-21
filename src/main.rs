@@ -673,6 +673,11 @@ impl JoyMapperApp {
 
         // Hardware Polling Thread (Full XInput coverage)
         std::thread::spawn(move || {
+            unsafe {
+                windows_sys::Win32::Media::timeBeginPeriod(1);
+            }
+
+            let poll_interval = Duration::from_millis(4);
             let mut was_connected = false;
             let mut last_tray_update = std::time::Instant::now();
             let click_tx = click_tx;
@@ -773,7 +778,7 @@ impl JoyMapperApp {
                     update_tray_icon("disconnected");
                     last_tray_update = std::time::Instant::now();
                 }
-                std::thread::sleep(Duration::from_millis(16));
+                std::thread::sleep(poll_interval);
             }
         });
 

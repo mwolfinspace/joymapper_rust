@@ -25,7 +25,8 @@ features = [
     "Win32_Graphics_Dwm",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
-    "Win32_System_LibraryLoader"
+    "Win32_System_LibraryLoader",
+    "Win32_Media"
 ]
 
 [build-dependencies]
