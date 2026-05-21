@@ -55,239 +55,105 @@ const ALL_INPUTS: &[&str] = &[
 fn parse_key_string(k: &str) -> Option<u16> {
     let k = k.to_lowercase();
     match k.as_str() {
-        "ctrl" => Some(0x11),
-        "shift" => Some(0x10),
-        "alt" => Some(0x12),
+        // Core System Modifiers
+        "ctrl" => Some(0x11), "shift" => Some(0x10), "alt" => Some(0x12),
         "win" | "command" | "meta" => Some(0x5B),
-        "space" => Some(0x20),
-        "enter" => Some(0x0D),
-        "escape" => Some(0x1B),
-        "tab" => Some(0x09),
-        "backspace" => Some(0x08),
-        "caps" => Some(0x14),
 
-        "arrowup" => Some(0x26),
-        "arrowdown" => Some(0x28),
-        "arrowleft" => Some(0x25),
-        "arrowright" => Some(0x27),
-        "home" => Some(0x24),
-        "end" => Some(0x23),
-        "pgup" => Some(0x21),
-        "pgdown" => Some(0x22),
-        "insert" => Some(0x2D),
-        "delete" => Some(0x2E),
+        // Navigation & Control Keys
+        "space" => Some(0x20), "enter" => Some(0x0D), "escape" => Some(0x1B),
+        "tab" => Some(0x09), "backspace" => Some(0x08), "caps" => Some(0x14),
+        "insert" => Some(0x2D), "delete" => Some(0x2E), "home" => Some(0x24),
+        "end" => Some(0x23), "pgup" => Some(0x21), "pgdown" => Some(0x22),
+        "arrowup" => Some(0x26), "arrowdown" => Some(0x28),
+        "arrowleft" => Some(0x25), "arrowright" => Some(0x27),
 
-        "lctrl" => Some(0xA2),
-        "rctrl" => Some(0xA3),
-        "lshift" => Some(0xA0),
-        "rshift" => Some(0xA1),
-        "lalt" => Some(0xA4),
-        "ralt" => Some(0xA5),
-
-        // OEM symbol keys — these require specific VK_OEM codes, not ASCII
-        "semicolon" | ";" => Some(0xBA),
-        "slash" | "/" => Some(0xBF),
-        "backtick" | "`" => Some(0xC0),
-        "lbracket" | "[" => Some(0xDB),
-        "backslash" | "\\" => Some(0xDC),
-        "rbracket" | "]" => Some(0xDD),
-        "quote" | "'" => Some(0xDE),
-        "comma" | "," => Some(0xBC),
-        "period" | "." => Some(0xBE),
-        "minus" | "-" => Some(0xBD),
-        "plus" | "=" => Some(0xBB),
-
-        // Numpad operator keys — distinct VK codes so they fire differently from row keys
-        "num+" | "numadd" => Some(0x6B),        // VK_ADD
-        "num-" | "numsub" => Some(0x6D),        // VK_SUBTRACT
-        "num*" | "nummul" => Some(0x6A),        // VK_MULTIPLY
-        "num/" | "numdiv" => Some(0x6F),        // VK_DIVIDE  (extended key)
-        "num." | "numdec" => Some(0x6E),        // VK_DECIMAL
-        "num_enter" | "numenter" => Some(0x0D), // VK_RETURN (scan code will differ via wScan)
-
-        "vol_mute" => Some(0xAD),
-        "vol_down" => Some(0xAE),
-        "vol_up" => Some(0xAF),
-        "media_next" => Some(0xB0),
-        "media_prev" => Some(0xB1),
-        "media_stop" => Some(0xB2),
-        "media_play_pause" => Some(0xB3),
-
-        "launch_mail" => Some(0xB4),
-        "launch_media" => Some(0xB5),
-        "launch_pc" => Some(0xB6),
-        "launch_calc" => Some(0xB7),
-
-        "browser_back" => Some(0xA6),
-        "browser_forward" => Some(0xA7),
-        "browser_refresh" => Some(0xA8),
-        "browser_stop" => Some(0xA9),
-        "browser_search" => Some(0xAA),
-        "browser_fav" => Some(0xAB),
-        "browser_home" => Some(0xAC),
+        // Exhaustive OEM Symbol Registry
+        ";" | "semicolon" => Some(0xBA),
+        "/" | "slash"     => Some(0xBF),
+        "`" | "backtick"  => Some(0xC0),
+        "[" | "lbracket"  => Some(0xDB),
+        "\\" | "backslash" => Some(0xDC),
+        "]" | "rbracket"  => Some(0xDD),
+        "'" | "quote"     => Some(0xDE),
+        "," | "comma"     => Some(0xBC),
+        "." | "period"    => Some(0xBE),
+        "-" | "minus"     => Some(0xBD),
+        "=" | "plus"      => Some(0xBB),
 
         _ => {
             if k.len() == 1 {
                 let c = k.chars().next().unwrap();
-                if c >= 'a' && c <= 'z' {
-                    Some(c.to_ascii_uppercase() as u16)
-                } else if c >= '0' && c <= '9' {
-                    Some(c as u16)
-                }
-                // VK_0..VK_9 = 0x30..0x39
-                else {
-                    None
-                }
-            } else if k.starts_with('f') && k.len() <= 3 {
+                if c.is_alphanumeric() { Some(c.to_ascii_uppercase() as u16) } else { None }
+            } else if k.starts_with('f') {
                 if let Ok(num) = k[1..].parse::<u16>() {
-                    if (1..=24).contains(&num) {
-                        return Some(0x6F + num);
-                    }
+                    if (1..=24).contains(&num) { return Some(0x6F + num); }
                 }
                 None
-            } else if k.starts_with("num") && k.len() == 4 {
-                // "num0".."num9" → VK_NUMPAD0..VK_NUMPAD9 = 0x60..0x69
-                // (numpad operator tokens like "num+" are already matched above)
-                if let Ok(digit) = k[3..].parse::<u16>() {
-                    if digit <= 9 {
-                        return Some(0x60 + digit);
-                    }
-                }
-                None
-            } else {
-                None
-            }
+            } else { None }
         }
     }
 }
 
 fn get_display_name(raw: &str) -> String {
-    // Numpad 0-9: "num0".."num9" → "Num 0".."Num 9"
-    if raw.len() == 4 && raw.starts_with("num") {
-        if let Ok(d) = raw[3..].parse::<u8>() {
-            if d <= 9 {
-                return format!("Num {}", d);
-            }
-        }
-    }
-    match raw {
-        // Numpad operators
-        "num+" => "Num +".to_string(),
-        "num-" => "Num -".to_string(),
-        "num*" => "Num *".to_string(),
-        "num/" => "Num /".to_string(),
-        "num." => "Num .".to_string(),
-        "num_enter" => "Num Enter".to_string(),
-        // OEM symbols
-        ";" => ";".to_string(),
-        "/" => "/".to_string(),
-        "`" => "`".to_string(),
-        "[" => "[".to_string(),
-        "\\" => "\\".to_string(),
-        "]" => "]".to_string(),
-        "'" => "'".to_string(),
-        "," => ",".to_string(),
-        "." => ".".to_string(),
-        "-" => "-".to_string(),
-        "=" => "=".to_string(),
+    if raw.is_empty() { return "None".to_string(); }
+    match raw.to_lowercase().as_str() {
+        "lbracket" => "[".to_string(),
+        "rbracket" => "]".to_string(),
+        "backslash" => "\\".to_string(),
+        "semicolon" => ";".to_string(),
+        "backtick" => "`".to_string(),
         _ => raw.to_uppercase(),
     }
 }
 
-fn simulate_macro(macro_str: &str, key_up: bool) {
-    if macro_str.is_empty() {
-        return;
-    }
-    let parts: Vec<&str> = macro_str.split('+').collect();
-
+fn simulate_key(vk: u16, key_up: bool) {
     unsafe {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
-        let mut inputs: Vec<INPUT> = Vec::new();
-
-        let parts_iter: Box<dyn Iterator<Item = &&str>> = if key_up {
-            Box::new(parts.iter().rev())
-        } else {
-            Box::new(parts.iter())
-        };
-
-        for part in parts_iter {
-            // For single non-alphanumeric characters, prefer the VK code path (handles
-            // [, ], ;, / etc. reliably — Unicode injection skips WM_KEYDOWN so games
-            // and system shortcuts never see it). Only fall back to Unicode for chars
-            // that have no OEM VK mapping (e.g. exotic Unicode symbols).
-            if part.len() == 1 {
-                let c = part.chars().next().unwrap();
-                if !c.is_alphanumeric() {
-                    if let Some(vk) = parse_key_string(part) {
-                        // Use the proper OEM virtual-key code so WM_KEYDOWN fires correctly.
-                        let mut input: INPUT = std::mem::zeroed();
-                        input.r#type = INPUT_KEYBOARD;
-                        input.Anonymous.ki.wVk = vk;
-                        input.Anonymous.ki.wScan =
-                            windows_sys::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW(
-                                vk as u32, 0,
-                            ) as u16;
-                        if key_up {
-                            input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
-                        }
-                        inputs.push(input);
-                    } else {
-                        // Fallback: Unicode injection for chars with no known OEM VK.
-                        let mut input: INPUT = std::mem::zeroed();
-                        input.r#type = INPUT_KEYBOARD;
-                        input.Anonymous.ki.wVk = 0;
-                        input.Anonymous.ki.wScan = c as u16;
-                        input.Anonymous.ki.dwFlags = KEYEVENTF_UNICODE;
-                        if key_up {
-                            input.Anonymous.ki.dwFlags |= KEYEVENTF_KEYUP;
-                        }
-                        inputs.push(input);
-                    }
-                    continue;
-                }
-            }
-            if let Some(vk) = parse_key_string(part) {
-                let mut input: INPUT = std::mem::zeroed();
-                input.r#type = INPUT_KEYBOARD;
-                input.Anonymous.ki.wVk = vk;
-                // Always populate the hardware scan code. Programs that distinguish
-                // numpad keys from top-row keys (games, DAWs, etc.) check wScan
-                // alongside wVk. MapVirtualKeyW(VK_NUMPAD5, MAPVK_VK_TO_VSC) returns
-                // 0x4C, which is different from the row-5 scan code 0x06 — the
-                // receiving application can then see the correct physical origin.
-                input.Anonymous.ki.wScan =
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW(vk as u32, 0)
-                        as u16;
-                // VK_DIVIDE (numpad /) and the navigation cluster keys are extended keys;
-                // flag them so the scan code is correctly interpreted as E0-prefixed.
-                let extended_vks: &[u16] = &[
-                    0x6F, // VK_DIVIDE  (Numpad /)
-                    0x25, 0x26, 0x27, 0x28, // arrow keys
-                    0x24, 0x23, 0x21, 0x22, // Home/End/PgUp/PgDn
-                    0x2D, 0x2E, // Insert/Delete
-                    0xA3, 0xA5, // RCtrl, RAlt
-                ];
-                if extended_vks.contains(&vk) {
-                    input.Anonymous.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-                }
-                if key_up {
-                    input.Anonymous.ki.dwFlags |= KEYEVENTF_KEYUP;
-                }
-                inputs.push(input);
-            }
+        let mut input: INPUT = std::mem::zeroed();
+        input.r#type = INPUT_KEYBOARD;
+        input.Anonymous.ki.wVk = vk;
+        input.Anonymous.ki.wScan =
+            MapVirtualKeyW(vk as u32, 0) as u16;
+        let extended_vks: &[u16] = &[
+            0x6F, 0x25, 0x26, 0x27, 0x28,
+            0x24, 0x23, 0x21, 0x22,
+            0x2D, 0x2E,
+            0xA3, 0xA5,
+        ];
+        if extended_vks.contains(&vk) {
+            input.Anonymous.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
         }
-        if !inputs.is_empty() {
-            SendInput(
-                inputs.len() as u32,
-                inputs.as_ptr(),
-                std::mem::size_of::<INPUT>() as i32,
-            );
+        if key_up {
+            input.Anonymous.ki.dwFlags |= KEYEVENTF_KEYUP;
+        }
+        SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) {
+    unsafe {
+        use windows_sys::Win32::UI::Input::XboxController::*;
+        let mut state: XINPUT_STATE = std::mem::zeroed();
+        let result = XInputGetState(index, &mut state);
+        if result == 0 {
+            let gp = state.Gamepad;
+            (
+                true,
+                gp.wButtons,
+                gp.sThumbLX,
+                gp.sThumbLY,
+                gp.sThumbRX,
+                gp.sThumbRY,
+                gp.bLeftTrigger,
+                gp.bRightTrigger,
+            )
+        } else {
+            (false, 0, 0, 0, 0, 0, 0, 0)
         }
     }
 }
 
 // Extract the raw bitmap data (BITMAPINFOHEADER + XOR mask + AND mask) for
-// the best-matching entry in an embedded .ico blob, then create an HICON.
 fn extract_icon_data(ico_bytes: &[u8]) -> Option<&[u8]> {
     if ico_bytes.len() < 6 {
         return None;
@@ -339,29 +205,6 @@ unsafe fn load_icon_from_bytes(data: &[u8]) -> isize {
     }
 }
 
-fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) {
-    unsafe {
-        use windows_sys::Win32::UI::Input::XboxController::*;
-        let mut state: XINPUT_STATE = std::mem::zeroed();
-        let result = XInputGetState(index, &mut state);
-        if result == 0 {
-            let gp = state.Gamepad;
-            (
-                true,
-                gp.wButtons,
-                gp.sThumbLX,
-                gp.sThumbLY,
-                gp.sThumbRX,
-                gp.sThumbRY,
-                gp.bLeftTrigger,
-                gp.bRightTrigger,
-            )
-        } else {
-            (false, 0, 0, 0, 0, 0, 0, 0)
-        }
-    }
-}
-
 fn is_windows_dark_mode() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     if let Ok(key) =
@@ -387,7 +230,27 @@ enum AppTheme {
 struct Profile {
     #[serde(default)]
     last_used: bool,
+    mappings: HashMap<String, Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct OldProfile {
+    #[serde(default)]
+    last_used: bool,
     mappings: HashMap<String, String>,
+}
+
+impl From<OldProfile> for Profile {
+    fn from(old: OldProfile) -> Self {
+        Profile {
+            last_used: old.last_used,
+            mappings: old.mappings.into_iter().map(|(k, v)| (k, vec![v])).collect(),
+        }
+    }
+}
+
+fn default_mapping_vec() -> Vec<String> {
+    vec!["".to_string()]
 }
 
 #[derive(PartialEq)]
@@ -413,8 +276,9 @@ struct AppState {
     is_paused: bool,
     connected_device: Arc<Mutex<bool>>,
     pressed_inputs: Arc<Mutex<HashMap<String, bool>>>,
-    active_mapping: Arc<Mutex<HashMap<String, String>>>,
+    active_mapping: Arc<Mutex<HashMap<String, Vec<String>>>>,
     recording_key: Option<String>,
+    recording_slot: Option<usize>,
     window_configured: bool,
     sound_enabled: bool,
     sound_enabled_atomic: Arc<AtomicBool>,
@@ -720,6 +584,9 @@ impl JoyMapperApp {
                         if let Ok(profile) = serde_json::from_str::<Profile>(&data) {
                             let name = path.file_stem().unwrap().to_string_lossy().to_string();
                             profiles.insert(name, profile);
+                        } else if let Ok(old) = serde_json::from_str::<OldProfile>(&data) {
+                            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                            profiles.insert(name, Profile::from(old));
                         }
                     }
                 }
@@ -729,7 +596,7 @@ impl JoyMapperApp {
         if profiles.is_empty() {
             let mut default_mappings = HashMap::new();
             for name in ALL_INPUTS {
-                default_mappings.insert(name.to_string(), "".to_string());
+                default_mappings.insert(name.to_string(), default_mapping_vec());
             }
             let default = Profile {
                 mappings: default_mappings,
@@ -747,7 +614,7 @@ impl JoyMapperApp {
                 profile
                     .mappings
                     .entry(name.to_string())
-                    .or_insert_with(|| "".to_string());
+                    .or_insert_with(default_mapping_vec);
             }
         }
 
@@ -860,22 +727,33 @@ impl JoyMapperApp {
                     let mut lock = pressed_clone.lock().unwrap();
                     let macro_map = mapping_clone.lock().unwrap();
 
-                    // CRITICAL FIX: Track if any state changed to force the UI to repaint instantly
                     let mut state_changed = false;
 
                     for (name, is_pressed) in &current_pressed {
                         let was_pressed = *lock.get(name).unwrap_or(&false);
                         if *is_pressed && !was_pressed {
-                            if let Some(macro_str) = macro_map.get(name) {
-                                simulate_macro(macro_str, false);
+                            if let Some(keys_vec) = macro_map.get(name) {
+                                for key_str in keys_vec {
+                                    if !key_str.is_empty() {
+                                        if let Some(vk) = parse_key_string(key_str) {
+                                            simulate_key(vk, false);
+                                        }
+                                    }
+                                }
                             }
                             if sound_enabled.load(Ordering::SeqCst) {
                                 let _ = click_tx.send(());
                             }
                             state_changed = true;
                         } else if !*is_pressed && was_pressed {
-                            if let Some(macro_str) = macro_map.get(name) {
-                                simulate_macro(macro_str, true);
+                            if let Some(keys_vec) = macro_map.get(name) {
+                                for key_str in keys_vec.iter().rev() {
+                                    if !key_str.is_empty() {
+                                        if let Some(vk) = parse_key_string(key_str) {
+                                            simulate_key(vk, true);
+                                        }
+                                    }
+                                }
                             }
                             state_changed = true;
                         }
@@ -912,6 +790,7 @@ impl JoyMapperApp {
                 pressed_inputs,
                 active_mapping,
                 recording_key: None,
+                recording_slot: None,
                 window_configured: false,
                 sound_enabled: true,
                 sound_enabled_atomic: sound_enabled,
@@ -1165,13 +1044,22 @@ impl eframe::App for JoyMapperApp {
         if let Some((k, macro_str)) = recording_result {
             if macro_str == "__cancel__" {
                 self.state.recording_key = None;
+                self.state.recording_slot = None;
             } else {
-                self.state
+                let slot = self.state.recording_slot.take().unwrap_or(0);
+                if let Some(keys_vec) = self.state
                     .profiles
                     .get_mut(&self.state.current_profile_name)
                     .unwrap()
                     .mappings
-                    .insert(k, macro_str);
+                    .get_mut(&k)
+                {
+                    if slot < keys_vec.len() {
+                        keys_vec[slot] = macro_str;
+                    } else {
+                        keys_vec.push(macro_str);
+                    }
+                }
                 self.state.save_to_disk();
                 self.state.recording_key = None;
                 ctx.request_repaint();
@@ -1222,7 +1110,9 @@ impl eframe::App for JoyMapperApp {
                             if ui.button("📂 Import").clicked() {
                                 if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
                                     if let Ok(content) = std::fs::read_to_string(&path) {
-                                        if let Ok(profile) = serde_json::from_str::<Profile>(&content) {
+                                        let profile = serde_json::from_str::<Profile>(&content)
+                                            .or_else(|_| serde_json::from_str::<OldProfile>(&content).map(Profile::from));
+                                        if let Ok(profile) = profile {
                                             let stem = path.file_stem().unwrap().to_string_lossy().to_string();
                                             let dest = profiles_dir().join(format!("{}.json", stem));
                                             let _ = std::fs::copy(&path, &dest);
@@ -1244,7 +1134,7 @@ impl eframe::App for JoyMapperApp {
 
                             if ui.button("➕ New").clicked() {
                                 let mut new_mappings = HashMap::new();
-                                for name in ALL_INPUTS { new_mappings.insert(name.to_string(), "".to_string()); }
+                                for name in ALL_INPUTS { new_mappings.insert(name.to_string(), default_mapping_vec()); }
                                 let mut unique_name = "New Profile".to_string();
                                 let mut counter = 1;
                                 while self.state.profiles.contains_key(&unique_name) {
@@ -1288,174 +1178,158 @@ impl eframe::App for JoyMapperApp {
 
                         ui.add_space(10.0);
                         let mut needs_save = false;
+                        let mut recording_click: Option<(String, usize)> = None;
 
-                        // RESPONSIVE TABLE (JoyToKey Style)
-                        use egui_extras::{TableBuilder, Column};
-
-                        let table = TableBuilder::new(ui)
-                            .striped(true)
-                            .resizable(true)
-                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                            .column(Column::initial(120.0).at_least(90.0))
-                            .column(Column::remainder().at_least(100.0))
-                            .column(Column::initial(50.0).at_least(40.0).clip(true))
-                            .min_scrolled_height(0.0);
-
-                        table.header(28.0, |mut header| {
-                            header.col(|ui| { ui.strong("Controller Input"); });
-                            header.col(|ui| { ui.strong("Mapped Key(s)"); });
-                            header.col(|ui| { ui.strong("Action"); });
-                        })
-                        .body(|mut body| {
+                        let pressed_mask: Vec<bool> = {
                             let lock = self.state.pressed_inputs.lock().unwrap();
-                            let current_profile = self.state.profiles.get_mut(&self.state.current_profile_name).unwrap();
+                            ALL_INPUTS.iter().map(|name| *lock.get(*name).unwrap_or(&false)).collect()
+                        };
+                        let recording_name = self.state.recording_key.clone();
 
-                            // CRITICAL FIX: Iterate over the constant ALL_INPUTS list, not the JSON map.
-                            // This ensures the table renders in a perfect, logical order every time.
-                            for name in ALL_INPUTS {
-                                let input_name = name.to_string();
-                                let is_pressed = *lock.get(&input_name).unwrap_or(&false);
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (row_idx, input_name) in ALL_INPUTS.iter().enumerate() {
+                                let is_pressed = pressed_mask[row_idx];
 
-                                body.row(32.0, |mut row| {
-                                    row.col(|ui| {
-                                        let mut text = egui::RichText::new(&input_name);
+                                ui.horizontal(|ui| {
+                                    // Column 1: Controller Button Identifier
+                                    ui.allocate_ui(egui::vec2(110.0, 24.0), |ui| {
+                                        let mut text = egui::RichText::new(*input_name).strong();
                                         if is_pressed {
-                                            text = text.color(Color32::from_rgb(0, 200, 255)).strong();
+                                            text = text.color(Color32::from_rgb(0, 200, 255));
                                         }
                                         ui.label(text);
                                     });
 
-                                    row.col(|ui| {
-                                        let val = current_profile.mappings.get(&input_name).unwrap();
-                                        let display_text = if val.is_empty() { "Unmapped".to_string() } else { get_display_name(val) };
+                                    // Column 2: Multi-key cells with auto-wrap
+                                    let key_slots = self.state.profiles.get_mut(&self.state.current_profile_name)
+                                        .unwrap()
+                                        .mappings
+                                        .get_mut(*input_name)
+                                        .unwrap();
 
-                                        let response = ui.add_sized(ui.available_size(), egui::Button::new(display_text));
-                                        if response.clicked() {
-                                            self.state.recording_key = Some(input_name.clone());
-                                            ctx.request_repaint();
-                                        }
-                                        response.context_menu(|ui| {
-                                            ui.set_min_width(180.0);
-                                            ui.label(egui::RichText::new("Assign Key").strong());
-                                            ui.separator();
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+                                        let slots_count = key_slots.len();
 
-                                            ui.menu_button("Mod Keys", |ui| {
-                                                if ui.button("Ctrl").clicked() { current_profile.mappings.insert(input_name.clone(), "ctrl".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Alt").clicked() { current_profile.mappings.insert(input_name.clone(), "alt".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Shift").clicked() { current_profile.mappings.insert(input_name.clone(), "shift".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Win").clicked() { current_profile.mappings.insert(input_name.clone(), "win".to_string()); needs_save = true; ui.close_menu(); }
+                                        for idx in 0..slots_count {
+                                            let current_val = &key_slots[idx];
+                                            let display = get_display_name(current_val);
+
+                                            let is_recording = recording_name.as_deref() == Some(*input_name);
+                                            let button_color = if is_recording {
+                                                Color32::from_rgb(220, 120, 0)
+                                            } else if current_val.is_empty() {
+                                                Color32::from_rgba_unmultiplied(70, 75, 85, 100)
+                                            } else {
+                                                Color32::from_rgb(0, 140, 240)
+                                            };
+
+                                            let cell_btn = ui.add(egui::Button::new(egui::RichText::new(display).monospace().color(Color32::WHITE))
+                                                .fill(button_color)
+                                                .stroke(if is_recording { egui::Stroke::new(2.0, Color32::from_rgb(255, 180, 0)) } else { egui::Stroke::new(0.0, Color32::TRANSPARENT) })
+                                                .min_size(egui::vec2(42.0, 22.0)));
+
+                                            if cell_btn.clicked() {
+                                                recording_click = Some((input_name.to_string(), idx));
+                                                ctx.request_repaint();
+                                            }
+
+                                            cell_btn.context_menu(|ui| {
+                                                ui.set_min_width(200.0);
+                                                ui.label(egui::RichText::new("Assign Target Key").strong());
                                                 ui.separator();
-                                                if ui.button("Left Ctrl").clicked() { current_profile.mappings.insert(input_name.clone(), "lctrl".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Right Ctrl").clicked() { current_profile.mappings.insert(input_name.clone(), "rctrl".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Left Shift").clicked() { current_profile.mappings.insert(input_name.clone(), "lshift".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Right Shift").clicked() { current_profile.mappings.insert(input_name.clone(), "rshift".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Left Alt").clicked() { current_profile.mappings.insert(input_name.clone(), "lalt".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Right Alt").clicked() { current_profile.mappings.insert(input_name.clone(), "ralt".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
 
-                                            ui.menu_button("Typing Keys", |ui| {
-                                                if ui.button("Space").clicked() { current_profile.mappings.insert(input_name.clone(), "space".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Enter").clicked() { current_profile.mappings.insert(input_name.clone(), "enter".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Backspace").clicked() { current_profile.mappings.insert(input_name.clone(), "backspace".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Tab").clicked() { current_profile.mappings.insert(input_name.clone(), "tab".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Caps Lock").clicked() { current_profile.mappings.insert(input_name.clone(), "caps".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Escape").clicked() { current_profile.mappings.insert(input_name.clone(), "escape".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Delete").clicked() { current_profile.mappings.insert(input_name.clone(), "delete".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
-
-                                            ui.menu_button("# Symbols", |ui| {
-                                                if ui.button("; (Semicolon)").clicked() { current_profile.mappings.insert(input_name.clone(), ";".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("/ (Slash)").clicked() { current_profile.mappings.insert(input_name.clone(), "/".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("` (Backtick)").clicked() { current_profile.mappings.insert(input_name.clone(), "`".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("[ (LBracket)").clicked() { current_profile.mappings.insert(input_name.clone(), "[".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("\\ (Backslash)").clicked() { current_profile.mappings.insert(input_name.clone(), "\\".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("] (RBracket)").clicked() { current_profile.mappings.insert(input_name.clone(), "]".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("' (Quote)").clicked() { current_profile.mappings.insert(input_name.clone(), "'".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button(", (Comma)").clicked() { current_profile.mappings.insert(input_name.clone(), ",".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button(". (Period)").clicked() { current_profile.mappings.insert(input_name.clone(), ".".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("- (Minus)").clicked() { current_profile.mappings.insert(input_name.clone(), "-".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("= (Equals)").clicked() { current_profile.mappings.insert(input_name.clone(), "=".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
-
-                                            ui.menu_button("Numpad", |ui| {
-                                                ui.label(egui::RichText::new("Numpad Digits").weak().small());
-                                                for d in 0u8..=9 {
-                                                    if ui.button(format!("Num {}", d)).clicked() {
-                                                        current_profile.mappings.insert(input_name.clone(), format!("num{}", d));
-                                                        needs_save = true; ui.close_menu();
+                                                ui.menu_button("🔤 Letters (A - M)", |ui| {
+                                                    for c in b'A'..=b'M' {
+                                                        let ch = (c as char).to_string();
+                                                        if ui.button(&ch).clicked() { key_slots[idx] = ch.to_lowercase(); needs_save = true; ui.close_menu(); }
                                                     }
+                                                });
+
+                                                ui.menu_button("🔤 Letters (N - Z)", |ui| {
+                                                    for c in b'N'..=b'Z' {
+                                                        let ch = (c as char).to_string();
+                                                        if ui.button(&ch).clicked() { key_slots[idx] = ch.to_lowercase(); needs_save = true; ui.close_menu(); }
+                                                    }
+                                                });
+
+                                                ui.menu_button("🔢 Numbers (0 - 9)", |ui| {
+                                                    for n in b'0'..=b'9' {
+                                                        let num_str = (n as char).to_string();
+                                                        if ui.button(&num_str).clicked() { key_slots[idx] = num_str; needs_save = true; ui.close_menu(); }
+                                                    }
+                                                });
+
+                                                ui.menu_button("🔣 Symbols & Brackets", |ui| {
+                                                    let syms = [
+                                                        ("[", "lbracket"), ("]", "rbracket"), ("\\", "backslash"),
+                                                        (";", "semicolon"), ("/", "slash"), ("`", "backtick"),
+                                                        ("'", "quote"), (",", "comma"), (".", "period"),
+                                                        ("-", "minus"), ("=", "plus")
+                                                    ];
+                                                    for (disp, name) in syms {
+                                                        if ui.button(format!("{} ({})", disp, name)).clicked() {
+                                                            key_slots[idx] = name.to_string();
+                                                            needs_save = true;
+                                                            ui.close_menu();
+                                                        }
+                                                    }
+                                                });
+
+                                                ui.menu_button("⚙ Modifiers & Controls", |ui| {
+                                                    let controls = ["Ctrl", "Shift", "Alt", "Win", "Space", "Enter", "Tab", "Backspace", "Delete", "Escape"];
+                                                    for ctrl in controls {
+                                                        if ui.button(ctrl).clicked() {
+                                                            key_slots[idx] = ctrl.to_lowercase();
+                                                            needs_save = true;
+                                                            ui.close_menu();
+                                                        }
+                                                    }
+                                                });
+
+                                                ui.menu_button("🖥 Function Keys", |ui| {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        for f in 1..=12 {
+                                                            let f_str = format!("F{}", f);
+                                                            if ui.button(&f_str).clicked() { key_slots[idx] = f_str.to_lowercase(); needs_save = true; ui.close_menu(); }
+                                                        }
+                                                    });
+                                                });
+
+                                                ui.separator();
+                                                if ui.button("❌ Clear Slot").clicked() {
+                                                    key_slots[idx] = "".to_string();
+                                                    needs_save = true;
+                                                    ui.close_menu();
                                                 }
-                                                ui.separator();
-                                                ui.label(egui::RichText::new("Numpad Operators").weak().small());
-                                                if ui.button("Num +").clicked() { current_profile.mappings.insert(input_name.clone(), "num+".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Num -").clicked() { current_profile.mappings.insert(input_name.clone(), "num-".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Num *").clicked() { current_profile.mappings.insert(input_name.clone(), "num*".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Num /").clicked() { current_profile.mappings.insert(input_name.clone(), "num/".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Num .").clicked() { current_profile.mappings.insert(input_name.clone(), "num.".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Num Enter").clicked() { current_profile.mappings.insert(input_name.clone(), "num_enter".to_string()); needs_save = true; ui.close_menu(); }
                                             });
+                                        }
 
-                                            ui.menu_button("Navigation", |ui| {
-                                                if ui.button("↑ Arrow Up").clicked() { current_profile.mappings.insert(input_name.clone(), "arrowup".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("↓ Arrow Down").clicked() { current_profile.mappings.insert(input_name.clone(), "arrowdown".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("← Arrow Left").clicked() { current_profile.mappings.insert(input_name.clone(), "arrowleft".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("→ Arrow Right").clicked() { current_profile.mappings.insert(input_name.clone(), "arrowright".to_string()); needs_save = true; ui.close_menu(); }
-                                                ui.separator();
-                                                if ui.button("Home").clicked() { current_profile.mappings.insert(input_name.clone(), "home".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("End").clicked() { current_profile.mappings.insert(input_name.clone(), "end".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Page Up").clicked() { current_profile.mappings.insert(input_name.clone(), "pgup".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Page Down").clicked() { current_profile.mappings.insert(input_name.clone(), "pgdown".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Insert").clicked() { current_profile.mappings.insert(input_name.clone(), "insert".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
-
-                                            ui.menu_button("Fn Keys", |ui| {
-                                                for i in 1..=12 {
-                                                    if ui.button(format!("F{}", i)).clicked() { current_profile.mappings.insert(input_name.clone(), format!("f{}", i)); needs_save = true; ui.close_menu(); }
-                                                }
-                                            });
-
-                                            ui.separator();
-
-                                            ui.menu_button("🔊 Volume & Media", |ui| {
-                                                if ui.button("Mute").clicked() { current_profile.mappings.insert(input_name.clone(), "vol_mute".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Volume Up").clicked() { current_profile.mappings.insert(input_name.clone(), "vol_up".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Volume Down").clicked() { current_profile.mappings.insert(input_name.clone(), "vol_down".to_string()); needs_save = true; ui.close_menu(); }
-                                                ui.separator();
-                                                if ui.button("Play / Pause").clicked() { current_profile.mappings.insert(input_name.clone(), "media_play_pause".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Next Track").clicked() { current_profile.mappings.insert(input_name.clone(), "media_next".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Previous Track").clicked() { current_profile.mappings.insert(input_name.clone(), "media_prev".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Stop").clicked() { current_profile.mappings.insert(input_name.clone(), "media_stop".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
-
-                                            ui.menu_button("🚀 App Launchers", |ui| {
-                                                if ui.button("Calculator").clicked() { current_profile.mappings.insert(input_name.clone(), "launch_calc".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("My Computer").clicked() { current_profile.mappings.insert(input_name.clone(), "launch_pc".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Email").clicked() { current_profile.mappings.insert(input_name.clone(), "launch_mail".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Media Player").clicked() { current_profile.mappings.insert(input_name.clone(), "launch_media".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
-
-                                            ui.menu_button("🌐 Browser Controls", |ui| {
-                                                if ui.button("Back").clicked() { current_profile.mappings.insert(input_name.clone(), "browser_back".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Forward").clicked() { current_profile.mappings.insert(input_name.clone(), "browser_forward".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Refresh").clicked() { current_profile.mappings.insert(input_name.clone(), "browser_refresh".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Home").clicked() { current_profile.mappings.insert(input_name.clone(), "browser_home".to_string()); needs_save = true; ui.close_menu(); }
-                                                if ui.button("Search").clicked() { current_profile.mappings.insert(input_name.clone(), "browser_search".to_string()); needs_save = true; ui.close_menu(); }
-                                            });
-                                        });
-                                    });
-
-                                    row.col(|ui| {
-                                        ui.centered_and_justified(|ui| {
-                                            if ui.button("🗑").on_hover_text("Clear mapping").clicked() {
-                                                current_profile.mappings.insert(input_name.clone(), "".to_string());
+                                        if slots_count < 10 {
+                                            if ui.button(egui::RichText::new("➕").color(Color32::from_rgb(0, 220, 120))).on_hover_text("Add simultaneous key slot").clicked() {
+                                                key_slots.push("".to_string());
                                                 needs_save = true;
                                             }
-                                        });
+                                        }
+                                    });
+
+                                    // Column 3: Full Reset
+                                    ui.allocate_ui(egui::vec2(60.0, 24.0), |ui| {
+                                        if ui.button(egui::RichText::new("🗑").color(Color32::from_rgb(255, 100, 100))).on_hover_text("Reset to single unmapped slot").clicked() {
+                                            key_slots.clear();
+                                            key_slots.push("".to_string());
+                                            needs_save = true;
+                                        }
                                     });
                                 });
+                                ui.add(egui::Separator::default().spacing(4.0));
                             }
                         });
 
+                        if let Some((name, slot)) = recording_click {
+                            self.state.recording_key = Some(name);
+                            self.state.recording_slot = Some(slot);
+                            ctx.request_repaint();
+                        }
                         if needs_save { self.state.save_to_disk(); }
                     }
 
