@@ -67,18 +67,45 @@ fn parse_key_string(k: &str) -> Option<u16> {
         "arrowup" => Some(0x26), "arrowdown" => Some(0x28),
         "arrowleft" => Some(0x25), "arrowright" => Some(0x27),
 
-        // Exhaustive OEM Symbol Registry
-        ";" | "semicolon" => Some(0xBA),
-        "/" | "slash"     => Some(0xBF),
-        "`" | "backtick"  => Some(0xC0),
-        "[" | "lbracket"  => Some(0xDB),
-        "\\" | "backslash" => Some(0xDC),
-        "]" | "rbracket"  => Some(0xDD),
-        "'" | "quote"     => Some(0xDE),
-        "," | "comma"     => Some(0xBC),
-        "." | "period"    => Some(0xBE),
-        "-" | "minus"     => Some(0xBD),
-        "=" | "plus"      => Some(0xBB),
+        // Exhaustive OEM Symbol Registry (shifted + unshifted)
+        ";" | "semicolon" | ":" => Some(0xBA),
+        "/" | "slash" | "?"    => Some(0xBF),
+        "`" | "backtick" | "~" => Some(0xC0),
+        "[" | "lbracket" | "{" => Some(0xDB),
+        "\\" | "backslash" | "|" => Some(0xDC),
+        "]" | "rbracket" | "}" => Some(0xDD),
+        "'" | "quote" | "\""   => Some(0xDE),
+        "," | "comma" | "<"    => Some(0xBC),
+        "." | "period" | ">"   => Some(0xBE),
+        "-" | "minus" | "_"    => Some(0xBD),
+        "=" | "plus"           => Some(0xBB),
+
+        // Shifted symbol characters (same VK as their digit counterpart)
+        "!" | "exclaim" => Some(0x31), "@" | "at" => Some(0x32),
+        "#" | "hash" | "pound" => Some(0x33), "$" | "dollar" => Some(0x34),
+        "%" | "percent" => Some(0x35), "^" | "caret" => Some(0x36),
+        "&" | "ampersand" => Some(0x37), "*" | "asterisk" => Some(0x38),
+        "(" => Some(0x39), ")" => Some(0x30),
+
+        // Browser & Multimedia Keys (VK 0xA6–0xB7)
+        "browser_back" => Some(0xA6),
+        "browser_forward" => Some(0xA7),
+        "browser_refresh" => Some(0xA8),
+        "browser_stop" => Some(0xA9),
+        "browser_search" => Some(0xAA),
+        "browser_fav" | "browser_favorites" => Some(0xAB),
+        "browser_home" => Some(0xAC),
+        "vol_mute" | "volume_mute" => Some(0xAD),
+        "vol_down" | "volume_down" => Some(0xAE),
+        "vol_up" | "volume_up" => Some(0xAF),
+        "media_next" | "media_next_track" => Some(0xB0),
+        "media_prev" | "media_prev_track" => Some(0xB1),
+        "media_stop" => Some(0xB2),
+        "media_play_pause" => Some(0xB3),
+        "launch_mail" => Some(0xB4),
+        "launch_media" | "launch_media_select" => Some(0xB5),
+        "launch_pc" | "launch_app1" => Some(0xB6),
+        "launch_calc" | "launch_app2" => Some(0xB7),
 
         _ => {
             if k.len() == 1 {
@@ -102,6 +129,24 @@ fn get_display_name(raw: &str) -> String {
         "backslash" => "\\".to_string(),
         "semicolon" => ";".to_string(),
         "backtick" => "`".to_string(),
+        "browser_back" => "Browser Back".to_string(),
+        "browser_forward" => "Browser Fwd".to_string(),
+        "browser_refresh" => "Browser Refresh".to_string(),
+        "browser_stop" => "Browser Stop".to_string(),
+        "browser_search" => "Browser Search".to_string(),
+        "browser_fav" | "browser_favorites" => "Browser Favorites".to_string(),
+        "browser_home" => "Browser Home".to_string(),
+        "vol_mute" | "volume_mute" => "Vol Mute".to_string(),
+        "vol_down" | "volume_down" => "Vol Down".to_string(),
+        "vol_up" | "volume_up" => "Vol Up".to_string(),
+        "media_next" | "media_next_track" => "Next Track".to_string(),
+        "media_prev" | "media_prev_track" => "Prev Track".to_string(),
+        "media_stop" => "Media Stop".to_string(),
+        "media_play_pause" => "Play/Pause".to_string(),
+        "launch_mail" => "Launch Mail".to_string(),
+        "launch_media" | "launch_media_select" => "Launch Media".to_string(),
+        "launch_pc" | "launch_app1" => "Launch PC".to_string(),
+        "launch_calc" | "launch_app2" => "Launch Calc".to_string(),
         _ => raw.to_uppercase(),
     }
 }
@@ -119,6 +164,10 @@ fn simulate_key(vk: u16, key_up: bool) {
             0x24, 0x23, 0x21, 0x22,
             0x2D, 0x2E,
             0xA3, 0xA5,
+            0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC,
+            0xAD, 0xAE, 0xAF,
+            0xB0, 0xB1, 0xB2, 0xB3,
+            0xB4, 0xB5, 0xB6, 0xB7,
         ];
         if extended_vks.contains(&vk) {
             input.Anonymous.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
@@ -740,8 +789,10 @@ impl JoyMapperApp {
                             if let Some(keys_vec) = macro_map.get(name) {
                                 for key_str in keys_vec {
                                     if !key_str.is_empty() {
-                                        if let Some(vk) = parse_key_string(key_str) {
-                                            simulate_key(vk, false);
+                                        for part in key_str.split('+') {
+                                            if let Some(vk) = parse_key_string(part) {
+                                                simulate_key(vk, false);
+                                            }
                                         }
                                     }
                                 }
@@ -754,8 +805,10 @@ impl JoyMapperApp {
                             if let Some(keys_vec) = macro_map.get(name) {
                                 for key_str in keys_vec.iter().rev() {
                                     if !key_str.is_empty() {
-                                        if let Some(vk) = parse_key_string(key_str) {
-                                            simulate_key(vk, true);
+                                        for part in key_str.split('+').rev() {
+                                            if let Some(vk) = parse_key_string(part) {
+                                                simulate_key(vk, true);
+                                            }
                                         }
                                     }
                                 }
@@ -1276,10 +1329,21 @@ impl eframe::App for JoyMapperApp {
 
                                                 ui.menu_button("🔣 Symbols & Brackets", |ui| {
                                                     let syms = [
-                                                        ("[", "lbracket"), ("]", "rbracket"), ("\\", "backslash"),
-                                                        (";", "semicolon"), ("/", "slash"), ("`", "backtick"),
-                                                        ("'", "quote"), (",", "comma"), (".", "period"),
-                                                        ("-", "minus"), ("=", "plus")
+                                                        ("[", "lbracket"), ("{", "lbracket"),
+                                                        ("]", "rbracket"), ("}", "rbracket"),
+                                                        ("\\", "backslash"), ("|", "backslash"),
+                                                        (";", "semicolon"), (":", "semicolon"),
+                                                        ("/", "slash"), ("?", "slash"),
+                                                        ("`", "backtick"), ("~", "backtick"),
+                                                        ("'", "quote"), ("\"", "quote"),
+                                                        (",", "comma"), ("<", "comma"),
+                                                        (".", "period"), (">", "period"),
+                                                        ("-", "minus"), ("_", "minus"),
+                                                        ("=", "plus"),
+                                                        ("!", "exclaim"), ("@", "at"), ("#", "hash"),
+                                                        ("$", "dollar"), ("%", "percent"), ("^", "caret"),
+                                                        ("&", "ampersand"), ("*", "asterisk"),
+                                                        ("(", "("), (")", ")"),
                                                     ];
                                                     for (disp, name) in syms {
                                                         if ui.button(format!("{} ({})", disp, name)).clicked() {
@@ -1308,6 +1372,30 @@ impl eframe::App for JoyMapperApp {
                                                             if ui.button(&f_str).clicked() { key_slots[idx] = f_str.to_lowercase(); needs_save = true; ui.close_menu(); }
                                                         }
                                                     });
+                                                });
+
+                                                ui.menu_button("🌐 Browser", |ui| {
+                                                    let browser_keys = ["Browser Back", "Browser Fwd", "Browser Refresh", "Browser Stop", "Browser Search", "Browser Fav", "Browser Home"];
+                                                    let browser_tokens = ["browser_back", "browser_forward", "browser_refresh", "browser_stop", "browser_search", "browser_fav", "browser_home"];
+                                                    for (disp, tok) in browser_keys.iter().zip(browser_tokens.iter()) {
+                                                        if ui.button(*disp).clicked() { key_slots[idx] = tok.to_string(); needs_save = true; ui.close_menu(); }
+                                                    }
+                                                });
+
+                                                ui.menu_button("🎵 Media", |ui| {
+                                                    let media_keys = ["Vol Mute", "Vol Down", "Vol Up", "Next Track", "Prev Track", "Media Stop", "Play/Pause"];
+                                                    let media_tokens = ["vol_mute", "vol_down", "vol_up", "media_next", "media_prev", "media_stop", "media_play_pause"];
+                                                    for (disp, tok) in media_keys.iter().zip(media_tokens.iter()) {
+                                                        if ui.button(*disp).clicked() { key_slots[idx] = tok.to_string(); needs_save = true; ui.close_menu(); }
+                                                    }
+                                                });
+
+                                                ui.menu_button("📱 Apps & Launchers", |ui| {
+                                                    let app_keys = ["Launch Mail", "Launch Media", "Launch PC", "Launch Calc"];
+                                                    let app_tokens = ["launch_mail", "launch_media", "launch_pc", "launch_calc"];
+                                                    for (disp, tok) in app_keys.iter().zip(app_tokens.iter()) {
+                                                        if ui.button(*disp).clicked() { key_slots[idx] = tok.to_string(); needs_save = true; ui.close_menu(); }
+                                                    }
                                                 });
 
                                                 ui.separator();
