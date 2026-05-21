@@ -1,0 +1,32 @@
+[package]
+name = "joymapper_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.27", features = ["persistence"] }
+rodio = "0.17"
+rfd = "0.14"
+window-vibrancy = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+winreg = "0.52"
+raw-window-handle = "0.6"
+egui_extras = "0.27"
+
+# Direct, zero-overhead Windows API bindings
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_UI_Input_XboxController",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Registry",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader"
+]
+
+[build-dependencies]
+winres = "0.1"
