@@ -1174,6 +1174,7 @@ impl eframe::App for JoyMapperApp {
                     .insert(k, macro_str);
                 self.state.save_to_disk();
                 self.state.recording_key = None;
+                ctx.request_repaint();
             }
         }
 
@@ -1331,6 +1332,7 @@ impl eframe::App for JoyMapperApp {
                                         let response = ui.add_sized(ui.available_size(), egui::Button::new(display_text));
                                         if response.clicked() {
                                             self.state.recording_key = Some(input_name.clone());
+                                            ctx.request_repaint();
                                         }
                                         response.context_menu(|ui| {
                                             ui.set_min_width(180.0);
