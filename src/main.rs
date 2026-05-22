@@ -56,36 +56,53 @@ fn parse_key_string(k: &str) -> Option<u16> {
     let k = k.to_lowercase();
     match k.as_str() {
         // Core System Modifiers
-        "ctrl" => Some(0x11), "shift" => Some(0x10), "alt" => Some(0x12),
+        "ctrl" => Some(0x11),
+        "shift" => Some(0x10),
+        "alt" => Some(0x12),
         "win" | "command" | "meta" => Some(0x5B),
 
         // Navigation & Control Keys
-        "space" => Some(0x20), "enter" => Some(0x0D), "escape" => Some(0x1B),
-        "tab" => Some(0x09), "backspace" => Some(0x08), "caps" => Some(0x14),
-        "insert" => Some(0x2D), "delete" => Some(0x2E), "home" => Some(0x24),
-        "end" => Some(0x23), "pgup" => Some(0x21), "pgdown" => Some(0x22),
-        "arrowup" => Some(0x26), "arrowdown" => Some(0x28),
-        "arrowleft" => Some(0x25), "arrowright" => Some(0x27),
+        "space" => Some(0x20),
+        "enter" => Some(0x0D),
+        "escape" => Some(0x1B),
+        "tab" => Some(0x09),
+        "backspace" => Some(0x08),
+        "caps" => Some(0x14),
+        "insert" => Some(0x2D),
+        "delete" => Some(0x2E),
+        "home" => Some(0x24),
+        "end" => Some(0x23),
+        "pgup" => Some(0x21),
+        "pgdown" => Some(0x22),
+        "arrowup" => Some(0x26),
+        "arrowdown" => Some(0x28),
+        "arrowleft" => Some(0x25),
+        "arrowright" => Some(0x27),
 
         // Exhaustive OEM Symbol Registry (shifted + unshifted)
         ";" | "semicolon" | ":" => Some(0xBA),
-        "/" | "slash" | "?"    => Some(0xBF),
+        "/" | "slash" | "?" => Some(0xBF),
         "`" | "backtick" | "~" => Some(0xC0),
         "[" | "lbracket" | "{" => Some(0xDB),
         "\\" | "backslash" | "|" => Some(0xDC),
         "]" | "rbracket" | "}" => Some(0xDD),
-        "'" | "quote" | "\""   => Some(0xDE),
-        "," | "comma" | "<"    => Some(0xBC),
-        "." | "period" | ">"   => Some(0xBE),
-        "-" | "minus" | "_"    => Some(0xBD),
-        "=" | "plus"           => Some(0xBB),
+        "'" | "quote" | "\"" => Some(0xDE),
+        "," | "comma" | "<" => Some(0xBC),
+        "." | "period" | ">" => Some(0xBE),
+        "-" | "minus" | "_" => Some(0xBD),
+        "=" | "plus" => Some(0xBB),
 
         // Shifted symbol characters (same VK as their digit counterpart)
-        "!" | "exclaim" => Some(0x31), "@" | "at" => Some(0x32),
-        "#" | "hash" | "pound" => Some(0x33), "$" | "dollar" => Some(0x34),
-        "%" | "percent" => Some(0x35), "^" | "caret" => Some(0x36),
-        "&" | "ampersand" => Some(0x37), "*" | "asterisk" => Some(0x38),
-        "(" => Some(0x39), ")" => Some(0x30),
+        "!" | "exclaim" => Some(0x31),
+        "@" | "at" => Some(0x32),
+        "#" | "hash" | "pound" => Some(0x33),
+        "$" | "dollar" => Some(0x34),
+        "%" | "percent" => Some(0x35),
+        "^" | "caret" => Some(0x36),
+        "&" | "ampersand" => Some(0x37),
+        "*" | "asterisk" => Some(0x38),
+        "(" => Some(0x39),
+        ")" => Some(0x30),
 
         // Browser & Multimedia Keys (VK 0xA6–0xB7)
         "browser_back" => Some(0xA6),
@@ -110,19 +127,29 @@ fn parse_key_string(k: &str) -> Option<u16> {
         _ => {
             if k.len() == 1 {
                 let c = k.chars().next().unwrap();
-                if c.is_alphanumeric() { Some(c.to_ascii_uppercase() as u16) } else { None }
+                if c.is_alphanumeric() {
+                    Some(c.to_ascii_uppercase() as u16)
+                } else {
+                    None
+                }
             } else if k.starts_with('f') {
                 if let Ok(num) = k[1..].parse::<u16>() {
-                    if (1..=24).contains(&num) { return Some(0x6F + num); }
+                    if (1..=24).contains(&num) {
+                        return Some(0x6F + num);
+                    }
                 }
                 None
-            } else { None }
+            } else {
+                None
+            }
         }
     }
 }
 
 fn get_display_name(raw: &str) -> String {
-    if raw.is_empty() { return "None".to_string(); }
+    if raw.is_empty() {
+        return "None".to_string();
+    }
     match raw.to_lowercase().as_str() {
         "lbracket" => "[".to_string(),
         "rbracket" => "]".to_string(),
@@ -157,17 +184,11 @@ fn simulate_key(vk: u16, key_up: bool) {
         let mut input: INPUT = std::mem::zeroed();
         input.r#type = INPUT_KEYBOARD;
         input.Anonymous.ki.wVk = vk;
-        input.Anonymous.ki.wScan =
-            MapVirtualKeyW(vk as u32, 0) as u16;
+        input.Anonymous.ki.wScan = MapVirtualKeyW(vk as u32, 0) as u16;
         let extended_vks: &[u16] = &[
-            0x6F, 0x25, 0x26, 0x27, 0x28,
-            0x24, 0x23, 0x21, 0x22,
-            0x2D, 0x2E,
-            0xA3, 0xA5,
-            0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC,
-            0xAD, 0xAE, 0xAF,
-            0xB0, 0xB1, 0xB2, 0xB3,
-            0xB4, 0xB5, 0xB6, 0xB7,
+            0x6F, 0x25, 0x26, 0x27, 0x28, 0x24, 0x23, 0x21, 0x22, 0x2D, 0x2E, 0xA3, 0xA5, 0xA6,
+            0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4,
+            0xB5, 0xB6, 0xB7,
         ];
         if extended_vks.contains(&vk) {
             input.Anonymous.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
@@ -314,13 +335,87 @@ impl From<OldProfile> for Profile {
         Profile {
             last_used: old.last_used,
             total_key_presses: 0,
-            mappings: old.mappings.into_iter().map(|(k, v)| (k, vec![v])).collect(),
+            mappings: old
+                .mappings
+                .into_iter()
+                .map(|(k, v)| (k, vec![v]))
+                .collect(),
         }
     }
 }
 
 fn default_mapping_vec() -> Vec<String> {
     vec!["".to_string()]
+}
+
+struct Win11Colors {
+    app_bg: Color32,
+    surface: Color32,
+    surface_alt: Color32,
+    row_hover: Color32,
+    row_active: Color32,
+    border: Color32,
+    text: Color32,
+    muted: Color32,
+    accent: Color32,
+    accent_soft: Color32,
+    success: Color32,
+    danger: Color32,
+    warning: Color32,
+    empty_chip: Color32,
+}
+
+fn win11_colors(is_dark: bool) -> Win11Colors {
+    if is_dark {
+        Win11Colors {
+            app_bg: Color32::from_rgba_unmultiplied(32, 32, 36, 178),
+            surface: Color32::from_rgba_unmultiplied(43, 43, 48, 226),
+            surface_alt: Color32::from_rgba_unmultiplied(255, 255, 255, 13),
+            row_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+            row_active: Color32::from_rgba_unmultiplied(0, 120, 212, 38),
+            border: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+            text: Color32::from_rgb(243, 243, 243),
+            muted: Color32::from_rgb(178, 178, 178),
+            accent: Color32::from_rgb(0, 120, 212),
+            accent_soft: Color32::from_rgba_unmultiplied(0, 120, 212, 48),
+            success: Color32::from_rgb(108, 203, 95),
+            danger: Color32::from_rgb(255, 99, 88),
+            warning: Color32::from_rgb(255, 185, 0),
+            empty_chip: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+        }
+    } else {
+        Win11Colors {
+            app_bg: Color32::from_rgba_unmultiplied(243, 243, 243, 214),
+            surface: Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+            surface_alt: Color32::from_rgba_unmultiplied(0, 0, 0, 10),
+            row_hover: Color32::from_rgba_unmultiplied(0, 0, 0, 6),
+            row_active: Color32::from_rgba_unmultiplied(0, 120, 212, 32),
+            border: Color32::from_rgba_unmultiplied(0, 0, 0, 24),
+            text: Color32::from_rgb(32, 32, 32),
+            muted: Color32::from_rgb(96, 96, 96),
+            accent: Color32::from_rgb(0, 95, 184),
+            accent_soft: Color32::from_rgba_unmultiplied(0, 120, 212, 34),
+            success: Color32::from_rgb(16, 124, 16),
+            danger: Color32::from_rgb(196, 43, 28),
+            warning: Color32::from_rgb(157, 93, 0),
+            empty_chip: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
+        }
+    }
+}
+
+fn win11_card_frame(colors: &Win11Colors) -> egui::Frame {
+    egui::Frame::none()
+        .fill(colors.surface)
+        .stroke(egui::Stroke::new(1.0, colors.border))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(14.0))
+}
+
+fn input_display_name(raw: &str) -> String {
+    raw.replace("DPAD_", "D-pad ")
+        .replace("LS_", "Left stick ")
+        .replace("RS_", "Right stick ")
+        .replace('_', " ")
 }
 
 #[derive(PartialEq)]
@@ -752,7 +847,9 @@ impl JoyMapperApp {
         let sound_enabled_poll = sound_enabled.clone();
 
         let key_press_counter = Arc::new(AtomicU64::new(
-            profiles.get(&current_profile_name).map_or(0, |p| p.total_key_presses),
+            profiles
+                .get(&current_profile_name)
+                .map_or(0, |p| p.total_key_presses),
         ));
         let key_counter_poll = key_press_counter.clone();
 
@@ -959,19 +1056,20 @@ impl JoyMapperApp {
         };
 
         // Windows 11 rounding and padding
-        style.visuals.window_rounding = egui::Rounding::same(12.0);
-        style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
-        style.visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
-        style.visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
-        style.visuals.widgets.active.rounding = egui::Rounding::same(6.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        style.spacing.item_spacing = egui::vec2(8.0, 10.0);
-        style.spacing.menu_margin = egui::Margin::same(6.0);
+        style.visuals.window_rounding = egui::Rounding::same(8.0);
+        style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+        style.visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+        style.visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+        style.visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.menu_margin = egui::Margin::same(8.0);
+        style.spacing.indent = 16.0;
 
         // Windows 11 accent — blue highlight
-        let accent = Color32::from_rgb(0, 120, 212); // #0078D4
-        style.visuals.selection.bg_fill = accent;
-        style.visuals.hyperlink_color = accent;
+        let colors = win11_colors(is_dark);
+        style.visuals.selection.bg_fill = colors.accent;
+        style.visuals.hyperlink_color = colors.accent;
         style.visuals.widgets.hovered.bg_fill = if is_dark {
             Color32::from_rgba_unmultiplied(255, 255, 255, 20)
         } else {
@@ -987,18 +1085,14 @@ impl JoyMapperApp {
         let base_bg = if is_dark {
             Color32::from_rgba_unmultiplied(32, 32, 36, 252)
         } else {
-            Color32::from_rgba_unmultiplied(243, 243, 243, 252)
+            Color32::from_rgba_unmultiplied(255, 255, 255, 252)
         };
         style.visuals.window_fill = base_bg;
         style.visuals.panel_fill = Color32::TRANSPARENT;
 
         // Subtle border to distinguish panels
-        let border_col = if is_dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 15)
-        } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 18)
-        };
-        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border_col);
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, colors.border);
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, colors.border);
 
         // Elevated shadow for menus / popups
         style.visuals.window_shadow = egui::epaint::Shadow {
@@ -1060,11 +1154,6 @@ impl eframe::App for JoyMapperApp {
 
         let is_dark = matches!(self.state.theme, AppTheme::Dark)
             || (matches!(self.state.theme, AppTheme::System) && is_windows_dark_mode());
-        let bg_color = if is_dark {
-            Color32::from_rgba_unmultiplied(30, 30, 35, 160)
-        } else {
-            Color32::from_rgba_unmultiplied(245, 245, 250, 160)
-        };
 
         let recording_result = if let Some(ref target_key) = self.state.recording_key {
             ctx.input(|i| {
@@ -1161,7 +1250,8 @@ impl eframe::App for JoyMapperApp {
                 self.state.recording_slot = None;
             } else {
                 let slot = self.state.recording_slot.take().unwrap_or(0);
-                if let Some(keys_vec) = self.state
+                if let Some(keys_vec) = self
+                    .state
                     .profiles
                     .get_mut(&self.state.current_profile_name)
                     .unwrap()
@@ -1181,87 +1271,140 @@ impl eframe::App for JoyMapperApp {
         }
 
         // --- 3. UI RENDERING ---
+        let colors = win11_colors(is_dark);
+        let connected = *self.state.connected_device.lock().unwrap();
+        let status_text = if self.state.is_paused {
+            "Paused"
+        } else if connected {
+            "Controller connected"
+        } else {
+            "No controller"
+        };
+        let status_color = if self.state.is_paused {
+            colors.warning
+        } else if connected {
+            colors.success
+        } else {
+            colors.danger
+        };
 
-        // TOP PANEL: Static Header & Tabs
         egui::TopBottomPanel::top("top_panel")
-            .frame(egui::Frame::none().fill(bg_color).inner_margin(12.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(colors.app_bg)
+                    .inner_margin(egui::Margin::symmetric(18.0, 14.0)),
+            )
             .show(ctx, |ui| {
-                ui.heading(egui::RichText::new("🎮  JoyMapper Pro").size(20.0).strong());
-                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.state.active_tab, Tab::Mappings, "🎯 Mappings");
-                    ui.selectable_value(&mut self.state.active_tab, Tab::Settings, "⚙ Settings");
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("JoyMapper Pro")
+                                .size(22.0)
+                                .strong()
+                                .color(colors.text),
+                        );
+                        ui.label(
+                            egui::RichText::new("XInput to keyboard profiles")
+                                .size(12.0)
+                                .color(colors.muted),
+                        );
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        egui::Frame::none()
+                            .fill(colors.surface_alt)
+                            .stroke(egui::Stroke::new(1.0, colors.border))
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(status_color, "o");
+                                    ui.label(egui::RichText::new(status_text).color(colors.text));
+                                });
+                            });
+                    });
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.state.active_tab, Tab::Mappings, "Mappings");
+                    ui.selectable_value(&mut self.state.active_tab, Tab::Settings, "Settings");
                 });
             });
 
-        // CENTRAL PANEL: Fills the rest of the window (Responsive)
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(bg_color).inner_margin(12.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(colors.app_bg)
+                    .inner_margin(egui::Margin::symmetric(18.0, 10.0)),
+            )
             .show(ctx, |ui| {
-
                 match self.state.active_tab {
                     Tab::Mappings => {
-                        ui.horizontal(|ui| {
-                            ui.label("Profile:");
-                            egui::ComboBox::from_id_source("profile_select")
-                                .selected_text(&self.state.current_profile_name)
-                                .show_ui(ui, |ui| {
-                                    let names: Vec<_> = self.state.profiles.keys().cloned().collect();
-                                    for name in names {
-                                        if ui.selectable_value(&mut self.state.current_profile_name, name.clone(), name).clicked() {
-                                            self.state.save_to_disk();
+                        win11_card_frame(&colors).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Profile").color(colors.muted));
+                                egui::ComboBox::from_id_source("profile_select")
+                                    .selected_text(egui::RichText::new(&self.state.current_profile_name).color(colors.text))
+                                    .show_ui(ui, |ui| {
+                                        let names: Vec<_> = self.state.profiles.keys().cloned().collect();
+                                        for name in names {
+                                            if ui
+                                                .selectable_value(&mut self.state.current_profile_name, name.clone(), name)
+                                                .clicked()
+                                            {
+                                                self.state.save_to_disk();
+                                            }
                                         }
-                                    }
-                                });
+                                    });
 
-                            if self.state.profiles.len() > 1 {
-                                if ui.button("✏").on_hover_text("Rename").clicked() {
+                                if self.state.profiles.len() > 1 && ui.button("Rename").clicked() {
                                     self.state.rename_target = Some(self.state.current_profile_name.clone());
                                     self.state.rename_buffer = self.state.current_profile_name.clone();
                                 }
-                            }
 
-                            if ui.button("📂 Import").clicked() {
-                                if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                                    if let Ok(content) = std::fs::read_to_string(&path) {
-                                        let profile = serde_json::from_str::<Profile>(&content)
-                                            .or_else(|_| serde_json::from_str::<OldProfile>(&content).map(Profile::from));
-                                        if let Ok(profile) = profile {
-                                            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                                            let dest = profiles_dir().join(format!("{}.json", stem));
-                                            let _ = std::fs::copy(&path, &dest);
-                                            self.state.profiles.insert(stem.clone(), profile);
-                                            self.state.current_profile_name = stem;
-                                            self.state.save_to_disk();
+                                if ui.button("Import").clicked() {
+                                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                                        if let Ok(content) = std::fs::read_to_string(&path) {
+                                            let profile = serde_json::from_str::<Profile>(&content)
+                                                .or_else(|_| serde_json::from_str::<OldProfile>(&content).map(Profile::from));
+                                            if let Ok(profile) = profile {
+                                                let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+                                                let dest = profiles_dir().join(format!("{}.json", stem));
+                                                let _ = std::fs::copy(&path, &dest);
+                                                self.state.profiles.insert(stem.clone(), profile);
+                                                self.state.current_profile_name = stem;
+                                                self.state.save_to_disk();
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            if ui.button("💾 Export").clicked() {
-                                if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
-                                    let profile = self.state.profiles.get(&self.state.current_profile_name).unwrap();
-                                    let json = serde_json::to_string_pretty(profile).unwrap();
-                                    let _ = std::fs::write(path, json);
+                                if ui.button("Export").clicked() {
+                                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
+                                        let profile = self.state.profiles.get(&self.state.current_profile_name).unwrap();
+                                        let json = serde_json::to_string_pretty(profile).unwrap();
+                                        let _ = std::fs::write(path, json);
+                                    }
                                 }
-                            }
 
-                            if ui.button("➕ New").clicked() {
-                                let mut new_mappings = HashMap::new();
-                                for name in ALL_INPUTS { new_mappings.insert(name.to_string(), default_mapping_vec()); }
-                                let mut unique_name = "New Profile".to_string();
-                                let mut counter = 1;
-                                while self.state.profiles.contains_key(&unique_name) {
-                                    counter += 1;
-                                    unique_name = format!("New Profile ({})", counter);
+                                if ui.button("New").clicked() {
+                                    let mut new_mappings = HashMap::new();
+                                    for name in ALL_INPUTS {
+                                        new_mappings.insert(name.to_string(), default_mapping_vec());
+                                    }
+                                    let mut unique_name = "New Profile".to_string();
+                                    let mut counter = 1;
+                                    while self.state.profiles.contains_key(&unique_name) {
+                                        counter += 1;
+                                        unique_name = format!("New Profile ({})", counter);
+                                    }
+                                    self.state.profiles.insert(unique_name.clone(), Profile { mappings: new_mappings, ..Default::default() });
+                                    self.state.current_profile_name = unique_name;
+                                    self.state.save_to_disk();
                                 }
-                                self.state.profiles.insert(unique_name.clone(), Profile { mappings: new_mappings, ..Default::default() });
-                                self.state.current_profile_name = unique_name;
-                                self.state.save_to_disk();
-                            }
 
-                            if self.state.profiles.len() > 1 {
-                                if ui.button("🗑 Delete").clicked() {
+                                if self.state.profiles.len() > 1 && ui.button("Delete").clicked() {
                                     let dir = profiles_dir();
                                     let path = dir.join(format!("{}.json", self.state.current_profile_name));
                                     let _ = std::fs::remove_file(&path);
@@ -1269,24 +1412,35 @@ impl eframe::App for JoyMapperApp {
                                     self.state.current_profile_name = self.state.profiles.keys().next().unwrap().clone();
                                     self.state.save_to_disk();
                                 }
-                            }
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button(if self.state.is_paused { "▶ Resume" } else { "⏸ Pause" }).clicked() {
-                                    self.state.is_paused = !self.state.is_paused;
-                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let label = if self.state.is_paused { "Resume" } else { "Pause" };
+                                    if ui
+                                        .add(egui::Button::new(label).fill(if self.state.is_paused { colors.accent } else { colors.surface_alt }))
+                                        .clicked()
+                                    {
+                                        self.state.is_paused = !self.state.is_paused;
+                                    }
+                                });
                             });
                         });
 
                         if let Some(ref rec_key) = self.state.recording_key {
-                            ui.add_space(4.0);
+                            ui.add_space(10.0);
                             egui::Frame::none()
-                                .fill(Color32::from_rgba_unmultiplied(220, 60, 0, 200))
-                                .rounding(6.0)
-                                .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                                .fill(if is_dark {
+                                    Color32::from_rgba_unmultiplied(80, 54, 0, 230)
+                                } else {
+                                    Color32::from_rgba_unmultiplied(255, 244, 206, 240)
+                                })
+                                .stroke(egui::Stroke::new(1.0, colors.warning))
+                                .rounding(egui::Rounding::same(8.0))
+                                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                                 .show(ui, |ui| {
-                                    ui.colored_label(Color32::WHITE,
-                                        format!("● Recording [ {} ] — press any key or combo, Esc to cancel", rec_key));
+                                    ui.colored_label(
+                                        colors.warning,
+                                        format!("Recording {}. Press a key or combo, Esc cancels.", input_display_name(rec_key)),
+                                    );
                                 });
                         }
 
@@ -1301,187 +1455,251 @@ impl eframe::App for JoyMapperApp {
                         let recording_name = self.state.recording_key.clone();
                         let recording_slot = self.state.recording_slot;
 
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for (row_idx, input_name) in ALL_INPUTS.iter().enumerate() {
-                                let is_pressed = pressed_mask[row_idx];
+                        win11_card_frame(&colors).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_sized([150.0, 20.0], egui::Label::new(egui::RichText::new("Input").small().color(colors.muted)));
+                                ui.label(egui::RichText::new("Mapped keys").small().color(colors.muted));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(egui::RichText::new("Action").small().color(colors.muted));
+                                });
+                            });
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(2.0);
 
-                                if is_pressed {
-                                    let row_top = ui.cursor().min.y;
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_max(egui::pos2(0.0, row_top), egui::pos2(ui.available_width(), row_top + 28.0)),
-                                        egui::Rounding::same(4.0),
-                                        Color32::from_rgba_unmultiplied(0, 120, 200, 30),
-                                    );
-                                }
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    for (row_idx, input_name) in ALL_INPUTS.iter().enumerate() {
+                                        let is_pressed = pressed_mask[row_idx];
+                                        let row_fill = if is_pressed {
+                                            colors.row_active
+                                        } else if row_idx % 2 == 0 {
+                                            Color32::TRANSPARENT
+                                        } else {
+                                            colors.row_hover
+                                        };
 
-                                ui.horizontal(|ui| {
-                                        // Column 1: Controller Button Identifier
-                                        ui.allocate_ui(egui::vec2(110.0, 24.0), |ui| {
-                                            let mut text = egui::RichText::new(*input_name).strong();
-                                            if is_pressed {
-                                                text = text.color(Color32::from_rgb(0, 200, 255));
-                                            }
-                                            ui.label(text);
-                                        });
+                                        egui::Frame::none()
+                                            .fill(row_fill)
+                                            .rounding(egui::Rounding::same(6.0))
+                                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.allocate_ui(egui::vec2(150.0, 30.0), |ui| {
+                                                        let text_color = if is_pressed { colors.accent } else { colors.text };
+                                                        ui.label(egui::RichText::new(input_display_name(input_name)).strong().color(text_color));
+                                                    });
 
-                                    // Column 2: Multi-key cells with auto-wrap
-                                    let key_slots = self.state.profiles.get_mut(&self.state.current_profile_name)
-                                        .unwrap()
-                                        .mappings
-                                        .get_mut(*input_name)
-                                        .unwrap();
+                                                    let key_slots = self.state.profiles.get_mut(&self.state.current_profile_name)
+                                                        .unwrap()
+                                                        .mappings
+                                                        .get_mut(*input_name)
+                                                        .unwrap();
 
-                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                                        let slots_count = key_slots.len();
+                                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
+                                                        let slots_count = key_slots.len();
 
-                                        for idx in 0..slots_count {
-                                            let current_val = &key_slots[idx];
-                                            let display = get_display_name(current_val);
+                                                        for idx in 0..slots_count {
+                                                            let current_val = &key_slots[idx];
+                                                            let display = get_display_name(current_val);
+                                                            let is_recording = recording_name.as_deref() == Some(*input_name) && recording_slot == Some(idx);
+                                                            let chip_fill = if is_recording {
+                                                                colors.warning
+                                                            } else if current_val.is_empty() {
+                                                                colors.empty_chip
+                                                            } else {
+                                                                colors.accent_soft
+                                                            };
+                                                            let chip_text = if is_recording {
+                                                                Color32::BLACK
+                                                            } else if current_val.is_empty() {
+                                                                colors.muted
+                                                            } else {
+                                                                colors.text
+                                                            };
+                                                            let chip_stroke = if is_recording {
+                                                                egui::Stroke::new(1.5, colors.warning)
+                                                            } else if current_val.is_empty() {
+                                                                egui::Stroke::new(1.0, colors.border)
+                                                            } else {
+                                                                egui::Stroke::new(1.0, colors.accent)
+                                                            };
 
-                                            let is_recording = recording_name.as_deref() == Some(*input_name) && recording_slot == Some(idx);
-                                            let button_color = if is_recording {
-                                                Color32::from_rgb(220, 120, 0)
-                                            } else if current_val.is_empty() {
-                                                Color32::from_rgba_unmultiplied(70, 75, 85, 100)
-                                            } else {
-                                                Color32::from_rgb(0, 140, 240)
-                                            };
+                                                            let cell_btn = ui.add(
+                                                                egui::Button::new(egui::RichText::new(display).monospace().color(chip_text))
+                                                                    .fill(chip_fill)
+                                                                    .stroke(chip_stroke)
+                                                                    .min_size(egui::vec2(56.0, 28.0)),
+                                                            );
 
-                                            let cell_btn = ui.add(egui::Button::new(egui::RichText::new(display).monospace().color(Color32::WHITE))
-                                                .fill(button_color)
-                                                .stroke(if is_recording { egui::Stroke::new(2.0, Color32::from_rgb(255, 180, 0)) } else { egui::Stroke::new(0.0, Color32::TRANSPARENT) })
-                                                .min_size(egui::vec2(42.0, 22.0)));
+                                                            if cell_btn.clicked() {
+                                                                recording_click = Some((input_name.to_string(), idx));
+                                                                ctx.request_repaint();
+                                                            }
 
-                                            if cell_btn.clicked() {
-                                                recording_click = Some((input_name.to_string(), idx));
-                                                ctx.request_repaint();
-                                            }
+                                                            cell_btn.context_menu(|ui| {
+                                                                ui.set_min_width(220.0);
+                                                                ui.label(egui::RichText::new("Assign target key").strong());
+                                                                ui.separator();
 
-                                            cell_btn.context_menu(|ui| {
-                                                ui.set_min_width(200.0);
-                                                ui.label(egui::RichText::new("Assign Target Key").strong());
-                                                ui.separator();
+                                                                ui.menu_button("Letters A-M", |ui| {
+                                                                    for c in b'A'..=b'M' {
+                                                                        let ch = (c as char).to_string();
+                                                                        if ui.button(&ch).clicked() {
+                                                                            key_slots[idx] = ch.to_lowercase();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
 
-                                                ui.menu_button("🔤 Letters (A - M)", |ui| {
-                                                    for c in b'A'..=b'M' {
-                                                        let ch = (c as char).to_string();
-                                                        if ui.button(&ch).clicked() { key_slots[idx] = ch.to_lowercase(); needs_save = true; ui.close_menu(); }
-                                                    }
-                                                });
+                                                                ui.menu_button("Letters N-Z", |ui| {
+                                                                    for c in b'N'..=b'Z' {
+                                                                        let ch = (c as char).to_string();
+                                                                        if ui.button(&ch).clicked() {
+                                                                            key_slots[idx] = ch.to_lowercase();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
 
-                                                ui.menu_button("🔤 Letters (N - Z)", |ui| {
-                                                    for c in b'N'..=b'Z' {
-                                                        let ch = (c as char).to_string();
-                                                        if ui.button(&ch).clicked() { key_slots[idx] = ch.to_lowercase(); needs_save = true; ui.close_menu(); }
-                                                    }
-                                                });
+                                                                ui.menu_button("Numbers 0-9", |ui| {
+                                                                    for n in b'0'..=b'9' {
+                                                                        let num_str = (n as char).to_string();
+                                                                        if ui.button(&num_str).clicked() {
+                                                                            key_slots[idx] = num_str;
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
 
-                                                ui.menu_button("🔢 Numbers (0 - 9)", |ui| {
-                                                    for n in b'0'..=b'9' {
-                                                        let num_str = (n as char).to_string();
-                                                        if ui.button(&num_str).clicked() { key_slots[idx] = num_str; needs_save = true; ui.close_menu(); }
-                                                    }
-                                                });
+                                                                ui.menu_button("Symbols", |ui| {
+                                                                    let syms = [
+                                                                        ("[", "lbracket"), ("{", "lbracket"),
+                                                                        ("]", "rbracket"), ("}", "rbracket"),
+                                                                        ("\\", "backslash"), ("|", "backslash"),
+                                                                        (";", "semicolon"), (":", "semicolon"),
+                                                                        ("/", "slash"), ("?", "slash"),
+                                                                        ("`", "backtick"), ("~", "backtick"),
+                                                                        ("'", "quote"), ("\"", "quote"),
+                                                                        (",", "comma"), ("<", "comma"),
+                                                                        (".", "period"), (">", "period"),
+                                                                        ("-", "minus"), ("_", "minus"),
+                                                                        ("=", "plus"),
+                                                                        ("!", "exclaim"), ("@", "at"), ("#", "hash"),
+                                                                        ("$", "dollar"), ("%", "percent"), ("^", "caret"),
+                                                                        ("&", "ampersand"), ("*", "asterisk"),
+                                                                        ("(", "("), (")", ")"),
+                                                                    ];
+                                                                    for (disp, name) in syms {
+                                                                        if ui.button(format!("{} ({})", disp, name)).clicked() {
+                                                                            key_slots[idx] = name.to_string();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
 
-                                                ui.menu_button("🔣 Symbols & Brackets", |ui| {
-                                                    let syms = [
-                                                        ("[", "lbracket"), ("{", "lbracket"),
-                                                        ("]", "rbracket"), ("}", "rbracket"),
-                                                        ("\\", "backslash"), ("|", "backslash"),
-                                                        (";", "semicolon"), (":", "semicolon"),
-                                                        ("/", "slash"), ("?", "slash"),
-                                                        ("`", "backtick"), ("~", "backtick"),
-                                                        ("'", "quote"), ("\"", "quote"),
-                                                        (",", "comma"), ("<", "comma"),
-                                                        (".", "period"), (">", "period"),
-                                                        ("-", "minus"), ("_", "minus"),
-                                                        ("=", "plus"),
-                                                        ("!", "exclaim"), ("@", "at"), ("#", "hash"),
-                                                        ("$", "dollar"), ("%", "percent"), ("^", "caret"),
-                                                        ("&", "ampersand"), ("*", "asterisk"),
-                                                        ("(", "("), (")", ")"),
-                                                    ];
-                                                    for (disp, name) in syms {
-                                                        if ui.button(format!("{} ({})", disp, name)).clicked() {
-                                                            key_slots[idx] = name.to_string();
-                                                            needs_save = true;
-                                                            ui.close_menu();
+                                                                ui.menu_button("Modifiers and controls", |ui| {
+                                                                    let controls = ["Ctrl", "Shift", "Alt", "Win", "Space", "Enter", "Tab", "Backspace", "Delete", "Escape"];
+                                                                    for ctrl in controls {
+                                                                        if ui.button(ctrl).clicked() {
+                                                                            key_slots[idx] = ctrl.to_lowercase();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                                ui.menu_button("Function keys", |ui| {
+                                                                    ui.horizontal_wrapped(|ui| {
+                                                                        for f in 1..=12 {
+                                                                            let f_str = format!("F{}", f);
+                                                                            if ui.button(&f_str).clicked() {
+                                                                                key_slots[idx] = f_str.to_lowercase();
+                                                                                needs_save = true;
+                                                                                ui.close_menu();
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                });
+
+                                                                ui.menu_button("Browser", |ui| {
+                                                                    let browser_keys = ["Browser Back", "Browser Fwd", "Browser Refresh", "Browser Stop", "Browser Search", "Browser Fav", "Browser Home"];
+                                                                    let browser_tokens = ["browser_back", "browser_forward", "browser_refresh", "browser_stop", "browser_search", "browser_fav", "browser_home"];
+                                                                    for (disp, tok) in browser_keys.iter().zip(browser_tokens.iter()) {
+                                                                        if ui.button(*disp).clicked() {
+                                                                            key_slots[idx] = tok.to_string();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                                ui.menu_button("Media", |ui| {
+                                                                    let media_keys = ["Vol Mute", "Vol Down", "Vol Up", "Next Track", "Prev Track", "Media Stop", "Play/Pause"];
+                                                                    let media_tokens = ["vol_mute", "vol_down", "vol_up", "media_next", "media_prev", "media_stop", "media_play_pause"];
+                                                                    for (disp, tok) in media_keys.iter().zip(media_tokens.iter()) {
+                                                                        if ui.button(*disp).clicked() {
+                                                                            key_slots[idx] = tok.to_string();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                                ui.menu_button("Apps and launchers", |ui| {
+                                                                    let app_keys = ["Launch Mail", "Launch Media", "Launch PC", "Launch Calc"];
+                                                                    let app_tokens = ["launch_mail", "launch_media", "launch_pc", "launch_calc"];
+                                                                    for (disp, tok) in app_keys.iter().zip(app_tokens.iter()) {
+                                                                        if ui.button(*disp).clicked() {
+                                                                            key_slots[idx] = tok.to_string();
+                                                                            needs_save = true;
+                                                                            ui.close_menu();
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                                ui.separator();
+                                                                if ui.button("Clear slot").clicked() {
+                                                                    key_slots[idx] = "".to_string();
+                                                                    needs_save = true;
+                                                                    ui.close_menu();
+                                                                }
+                                                            });
                                                         }
-                                                    }
-                                                });
 
-                                                ui.menu_button("⚙ Modifiers & Controls", |ui| {
-                                                    let controls = ["Ctrl", "Shift", "Alt", "Win", "Space", "Enter", "Tab", "Backspace", "Delete", "Escape"];
-                                                    for ctrl in controls {
-                                                        if ui.button(ctrl).clicked() {
-                                                            key_slots[idx] = ctrl.to_lowercase();
-                                                            needs_save = true;
-                                                            ui.close_menu();
+                                                        if slots_count < 10 {
+                                                            if ui
+                                                                .add(egui::Button::new("+").fill(colors.surface_alt).min_size(egui::vec2(30.0, 28.0)))
+                                                                .on_hover_text("Add simultaneous key slot")
+                                                                .clicked()
+                                                            {
+                                                                key_slots.push("".to_string());
+                                                                needs_save = true;
+                                                            }
                                                         }
-                                                    }
-                                                });
+                                                    });
 
-                                                ui.menu_button("🖥 Function Keys", |ui| {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        for f in 1..=12 {
-                                                            let f_str = format!("F{}", f);
-                                                            if ui.button(&f_str).clicked() { key_slots[idx] = f_str.to_lowercase(); needs_save = true; ui.close_menu(); }
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui
+                                                            .add(egui::Button::new("Reset").fill(colors.surface_alt).min_size(egui::vec2(64.0, 28.0)))
+                                                            .on_hover_text("Reset to a single unmapped slot")
+                                                            .clicked()
+                                                        {
+                                                            key_slots.clear();
+                                                            key_slots.push("".to_string());
+                                                            needs_save = true;
                                                         }
                                                     });
                                                 });
-
-                                                ui.menu_button("🌐 Browser", |ui| {
-                                                    let browser_keys = ["Browser Back", "Browser Fwd", "Browser Refresh", "Browser Stop", "Browser Search", "Browser Fav", "Browser Home"];
-                                                    let browser_tokens = ["browser_back", "browser_forward", "browser_refresh", "browser_stop", "browser_search", "browser_fav", "browser_home"];
-                                                    for (disp, tok) in browser_keys.iter().zip(browser_tokens.iter()) {
-                                                        if ui.button(*disp).clicked() { key_slots[idx] = tok.to_string(); needs_save = true; ui.close_menu(); }
-                                                    }
-                                                });
-
-                                                ui.menu_button("🎵 Media", |ui| {
-                                                    let media_keys = ["Vol Mute", "Vol Down", "Vol Up", "Next Track", "Prev Track", "Media Stop", "Play/Pause"];
-                                                    let media_tokens = ["vol_mute", "vol_down", "vol_up", "media_next", "media_prev", "media_stop", "media_play_pause"];
-                                                    for (disp, tok) in media_keys.iter().zip(media_tokens.iter()) {
-                                                        if ui.button(*disp).clicked() { key_slots[idx] = tok.to_string(); needs_save = true; ui.close_menu(); }
-                                                    }
-                                                });
-
-                                                ui.menu_button("📱 Apps & Launchers", |ui| {
-                                                    let app_keys = ["Launch Mail", "Launch Media", "Launch PC", "Launch Calc"];
-                                                    let app_tokens = ["launch_mail", "launch_media", "launch_pc", "launch_calc"];
-                                                    for (disp, tok) in app_keys.iter().zip(app_tokens.iter()) {
-                                                        if ui.button(*disp).clicked() { key_slots[idx] = tok.to_string(); needs_save = true; ui.close_menu(); }
-                                                    }
-                                                });
-
-                                                ui.separator();
-                                                if ui.button("❌ Clear Slot").clicked() {
-                                                    key_slots[idx] = "".to_string();
-                                                    needs_save = true;
-                                                    ui.close_menu();
-                                                }
                                             });
-                                        }
-
-                                        if slots_count < 10 {
-                                            if ui.button(egui::RichText::new("➕").color(Color32::from_rgb(0, 220, 120))).on_hover_text("Add simultaneous key slot").clicked() {
-                                                key_slots.push("".to_string());
-                                                needs_save = true;
-                                            }
-                                        }
-                                    });
-
-                                    // Column 3: Full Reset
-                                    ui.allocate_ui(egui::vec2(60.0, 24.0), |ui| {
-                                        if ui.button(egui::RichText::new("🗑").color(Color32::from_rgb(255, 100, 100))).on_hover_text("Reset to single unmapped slot").clicked() {
-                                            key_slots.clear();
-                                            key_slots.push("".to_string());
-                                            needs_save = true;
-                                        }
-                                    });
+                                        ui.add_space(2.0);
+                                    }
                                 });
-                                ui.add(egui::Separator::default().spacing(4.0));
-                            }
                         });
 
                         if let Some((name, slot)) = recording_click {
@@ -1489,145 +1707,135 @@ impl eframe::App for JoyMapperApp {
                             self.state.recording_slot = Some(slot);
                             ctx.request_repaint();
                         }
-                        if needs_save { self.state.save_to_disk(); }
+                        if needs_save {
+                            self.state.save_to_disk();
+                        }
                     }
 
                     Tab::Settings => {
-                        ui.vertical(|ui| {
-                            ui.checkbox(&mut self.state.close_to_tray, "Minimize to System Tray on close");
-                            if ui.checkbox(&mut self.state.run_at_startup, "Launch silently on Windows startup").changed() {
+                        let connected = *self.state.connected_device.lock().unwrap();
+
+                        win11_card_frame(&colors).show(ui, |ui| {
+                            ui.label(egui::RichText::new("General").size(16.0).strong().color(colors.text));
+                            ui.add_space(8.0);
+                            ui.checkbox(&mut self.state.close_to_tray, "Close button minimizes to system tray");
+                            if ui.checkbox(&mut self.state.run_at_startup, "Start with Windows").changed() {
                                 self.toggle_startup(self.state.run_at_startup);
                             }
 
-                            if ui.checkbox(&mut self.state.sound_enabled, "Play sound on button press").changed() {
+                            if ui.checkbox(&mut self.state.sound_enabled, "Play sound on controller press").changed() {
                                 self.state.sound_enabled_atomic.store(self.state.sound_enabled, Ordering::SeqCst);
                             }
 
-                            ui.add_space(15.0);
+                            ui.add_space(10.0);
                             ui.horizontal(|ui| {
-                                ui.label("Theme:");
+                                ui.label("Theme");
                                 egui::ComboBox::from_id_source("theme_select")
                                     .selected_text(match self.state.theme {
-                                        AppTheme::System => "System Default",
+                                        AppTheme::System => "Use Windows setting",
                                         AppTheme::Light => "Light",
                                         AppTheme::Dark => "Dark",
                                     })
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.state.theme, AppTheme::System, "System Default");
+                                        ui.selectable_value(&mut self.state.theme, AppTheme::System, "Use Windows setting");
                                         ui.selectable_value(&mut self.state.theme, AppTheme::Light, "Light");
                                         ui.selectable_value(&mut self.state.theme, AppTheme::Dark, "Dark");
                                     });
                             });
+                        });
 
-                            ui.add_space(20.0);
-                            ui.separator();
-                            ui.add_space(10.0);
+                        ui.add_space(10.0);
+                        win11_card_frame(&colors).show(ui, |ui| {
+                            ui.label(egui::RichText::new("Hardware").size(16.0).strong().color(colors.text));
+                            ui.add_space(8.0);
+                            if connected {
+                                ui.colored_label(colors.success, "Connected - controller active through XInput");
+                                ui.label(egui::RichText::new("Controller 0 | polling at 1000 Hz | XInput engine").color(colors.muted));
+                                let elapsed = self.state.connection_start.lock().unwrap().elapsed();
+                                let secs = elapsed.as_secs();
+                                let mins = secs / 60;
+                                let hrs = mins / 60;
+                                if hrs > 0 {
+                                    ui.label(format!("Connected for {}h {}m {}s", hrs, mins % 60, secs % 60));
+                                } else if mins > 0 {
+                                    ui.label(format!("Connected for {}m {}s", mins, secs % 60));
+                                } else {
+                                    ui.label(format!("Connected for {}s", secs));
+                                }
 
-                            ui.label(egui::RichText::new("Hardware Status").strong());
-                            ui.add_space(4.0);
-                            let connected = *self.state.connected_device.lock().unwrap();
+                                let (btype, blevel) = *self.state.battery_info.lock().unwrap();
+                                if btype == BATTERY_WIRED {
+                                    ui.label("Power: wired");
+                                } else if btype == BATTERY_DISCONNECTED {
+                                    ui.label("Battery: disconnected");
+                                } else if btype == BATTERY_ALKALINE || btype == BATTERY_NIMH {
+                                    let kind = if btype == BATTERY_NIMH { "NiMH" } else { "Alkaline" };
+                                    let (color, level_str) = match blevel {
+                                        0 => (colors.danger, "Empty"),
+                                        1 => (colors.warning, "Low"),
+                                        2 => (colors.warning, "Medium"),
+                                        _ => (colors.success, "Full"),
+                                    };
+                                    ui.colored_label(color, format!("Battery: {} ({})", level_str, kind));
+                                } else {
+                                    ui.label("Battery: unknown");
+                                }
+                            } else {
+                                ui.colored_label(colors.danger, "Disconnected - no controller detected");
+                                ui.label(egui::RichText::new("Plug in an XInput controller to begin.").color(colors.muted));
+                            }
+                        });
 
-                            egui::Frame::none()
-                                .fill(if is_dark { Color32::from_rgba_unmultiplied(20, 20, 25, 200) } else { Color32::from_rgba_unmultiplied(220, 220, 225, 200) })
-                                .rounding(8.0)
-                                .inner_margin(12.0)
-                                .show(ui, |ui| {
-                                    if connected {
-                                        ui.colored_label(Color32::from_rgb(0, 200, 100), "Connected  \u{2022}  Controller active via XInput");
-                                        ui.small("Controller 0  |  Polling at 1000 Hz  |  XInput engine");
-                                        let elapsed = self.state.connection_start.lock().unwrap().elapsed();
-                                        let secs = elapsed.as_secs();
-                                        let mins = secs / 60;
-                                        let hrs = mins / 60;
-                                        if hrs > 0 {
-                                            ui.small(format!("Connected for {}h {}m {}s", hrs, mins % 60, secs % 60));
-                                        } else if mins > 0 {
-                                            ui.small(format!("Connected for {}m {}s", mins, secs % 60));
-                                        } else {
-                                            ui.small(format!("Connected for {}s", secs));
-                                        }
-                                        let (btype, blevel) = *self.state.battery_info.lock().unwrap();
-                                        if btype == BATTERY_WIRED {
-                                            ui.colored_label(Color32::from_rgb(180, 180, 220), "Power: Wired");
-                                        } else if btype == BATTERY_DISCONNECTED {
-                                            ui.colored_label(Color32::from_rgb(180, 180, 180), "Battery: Disconnected");
-                                        } else if btype == BATTERY_ALKALINE || btype == BATTERY_NIMH {
-                                            let kind = if btype == BATTERY_NIMH { "NiMH" } else { "Alkaline" };
-                                            let (color, level_str) = match blevel {
-                                                0 => (Color32::from_rgb(220, 60, 60), "Empty"),
-                                                1 => (Color32::from_rgb(220, 160, 40), "Low"),
-                                                2 => (Color32::from_rgb(180, 200, 60), "Medium"),
-                                                _ => (Color32::from_rgb(0, 200, 100), "Full"),
-                                            };
-                                            ui.colored_label(color, format!("Battery: {} ({})", level_str, kind));
-                                        } else {
-                                            ui.colored_label(Color32::from_rgb(180, 180, 180), "Battery: Unknown");
-                                        }
-                                    } else {
-                                        ui.colored_label(Color32::from_rgb(220, 60, 60), "Disconnected  \u{2022}  No controller detected");
-                                        ui.small("Plug in an XInput controller to begin.");
-                                    }
-                                });
-
-                            ui.add_space(10.0);
-                            ui.label(egui::RichText::new("Statistics").strong());
-                            ui.add_space(4.0);
-                            egui::Frame::none()
-                                .fill(if is_dark { Color32::from_rgba_unmultiplied(20, 20, 25, 200) } else { Color32::from_rgba_unmultiplied(220, 220, 225, 200) })
-                                .rounding(8.0)
-                                .inner_margin(12.0)
-                                .show(ui, |ui| {
-                                    let count = self.state.key_press_counter.load(Ordering::Relaxed);
-                                    ui.label(format!("Total key presses recorded: {}", count));
-                                    ui.small("Counter is saved to profile on exit.");
-                                });
+                        ui.add_space(10.0);
+                        win11_card_frame(&colors).show(ui, |ui| {
+                            ui.label(egui::RichText::new("Statistics").size(16.0).strong().color(colors.text));
+                            ui.add_space(8.0);
+                            let count = self.state.key_press_counter.load(Ordering::Relaxed);
+                            ui.label(format!("Total key presses recorded: {}", count));
+                            ui.label(egui::RichText::new("Saved to the active profile on exit.").color(colors.muted));
                         });
                     }
                 }
             });
 
-        // --- RENAME PROFILE DIALOG ---
         if let Some(ref target) = self.state.rename_target.clone() {
             let mut open = true;
             egui::Window::new("Rename Profile")
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .fixed_size([280.0, 100.0])
+                .fixed_size([340.0, 132.0])
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Name:");
-                        if ui
-                            .text_edit_singleline(&mut self.state.rename_buffer)
-                            .lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
-                            let new_name = self.state.rename_buffer.trim().to_string();
-                            if !new_name.is_empty() && !self.state.profiles.contains_key(&new_name)
-                            {
-                                let dir = profiles_dir();
-                                let old_path = dir.join(format!("{}.json", target));
-                                let new_path = dir.join(format!("{}.json", &new_name));
-                                let _ = std::fs::rename(&old_path, &new_path);
-                                let mappings = self.state.profiles.remove(target).unwrap().mappings;
-                                self.state.profiles.insert(
-                                    new_name.clone(),
-                                    Profile {
-                                        mappings,
-                                        ..Default::default()
-                                    },
-                                );
-                                self.state.current_profile_name = new_name;
-                                self.state.save_to_disk();
-                                self.state.rename_target = None;
-                            }
+                    ui.label("Profile name");
+                    if ui
+                        .text_edit_singleline(&mut self.state.rename_buffer)
+                        .lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        let new_name = self.state.rename_buffer.trim().to_string();
+                        if !new_name.is_empty() && !self.state.profiles.contains_key(&new_name) {
+                            let dir = profiles_dir();
+                            let old_path = dir.join(format!("{}.json", target));
+                            let new_path = dir.join(format!("{}.json", &new_name));
+                            let _ = std::fs::rename(&old_path, &new_path);
+                            let mappings = self.state.profiles.remove(target).unwrap().mappings;
+                            self.state.profiles.insert(
+                                new_name.clone(),
+                                Profile {
+                                    mappings,
+                                    ..Default::default()
+                                },
+                            );
+                            self.state.current_profile_name = new_name;
+                            self.state.save_to_disk();
+                            self.state.rename_target = None;
                         }
-                    });
-                    ui.add_space(8.0);
+                    }
+
+                    ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
                             self.state.rename_target = None;
                         }
-                        ui.add_space(10.0);
                         if ui.button("Rename").clicked() {
                             let new_name = self.state.rename_buffer.trim().to_string();
                             if !new_name.is_empty() && !self.state.profiles.contains_key(&new_name)
@@ -1662,8 +1870,8 @@ impl eframe::App for JoyMapperApp {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([540.0, 520.0])
-            .with_min_inner_size([480.0, 440.0])
+            .with_inner_size([760.0, 640.0])
+            .with_min_inner_size([620.0, 520.0])
             .with_decorations(true)
             .with_transparent(true),
         persist_window: true,
