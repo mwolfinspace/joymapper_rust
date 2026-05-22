@@ -491,12 +491,47 @@ fn profiles_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+#[derive(Serialize, Deserialize)]
+struct AppConfig {
+    #[serde(default = "default_start_minimized")]
+    start_minimized: bool,
+}
+
+fn default_start_minimized() -> bool {
+    true
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            start_minimized: default_start_minimized(),
+        }
+    }
+}
+
+fn load_config() -> AppConfig {
+    let path = profiles_dir().join("config.json");
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        AppConfig::default()
+    }
+}
+
+fn save_config(config: &AppConfig) {
+    let path = profiles_dir().join("config.json");
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 struct AppState {
     profiles: HashMap<String, Profile>,
     current_profile_name: String,
     active_tab: Tab,
     theme: AppTheme,
     close_to_tray: bool,
+    start_minimized: bool,
     run_at_startup: bool,
     is_paused: bool,
     connected_device: Arc<Mutex<bool>>,
@@ -1065,6 +1100,8 @@ impl JoyMapperApp {
             std::thread::sleep(Duration::from_secs(30));
         });
 
+        let config = load_config();
+
         let mut app = Self {
             state: AppState {
                 profiles,
@@ -1072,6 +1109,7 @@ impl JoyMapperApp {
                 active_tab: Tab::Mappings,
                 theme: AppTheme::System,
                 close_to_tray: true,
+                start_minimized: config.start_minimized,
                 run_at_startup: false,
                 is_paused: false,
                 connected_device,
@@ -1207,6 +1245,10 @@ impl eframe::App for JoyMapperApp {
         }
 
         if !self.state.window_configured {
+            if self.state.start_minimized {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+
             if let Ok(handle) = frame.window_handle() {
                 let _ = window_vibrancy::apply_mica(&handle, Some(is_windows_dark_mode()));
 
@@ -1799,6 +1841,9 @@ impl eframe::App for JoyMapperApp {
                             ui.label(egui::RichText::new("General").size(16.0).strong().color(colors.text));
                             ui.add_space(8.0);
                             ui.checkbox(&mut self.state.close_to_tray, "Close button minimizes to system tray");
+                            if ui.checkbox(&mut self.state.start_minimized, "Start minimized to system tray").changed() {
+                                save_config(&AppConfig { start_minimized: self.state.start_minimized });
+                            }
                             if ui.checkbox(&mut self.state.run_at_startup, "Start with Windows").changed() {
                                 self.toggle_startup(self.state.run_at_startup);
                             }
@@ -1965,12 +2010,15 @@ impl eframe::App for JoyMapperApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let config = load_config();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([760.0, 640.0])
             .with_min_inner_size([620.0, 520.0])
             .with_decorations(true)
-            .with_transparent(true),
+            .with_transparent(true)
+            .with_visible(!config.start_minimized),
         persist_window: true,
         ..Default::default()
     };
