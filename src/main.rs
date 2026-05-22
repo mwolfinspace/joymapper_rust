@@ -223,7 +223,7 @@ fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) 
     }
 }
 
-fn query_battery(index: u32) -> (u8, u8) {
+fn query_xinput_battery(index: u32) -> (u8, u8) {
     unsafe {
         use windows_sys::Win32::UI::Input::XboxController::*;
         let mut info: XINPUT_BATTERY_INFORMATION = std::mem::zeroed();
@@ -231,15 +231,75 @@ fn query_battery(index: u32) -> (u8, u8) {
         if result == 0 {
             (info.BatteryType, info.BatteryLevel)
         } else {
-            (0xFF, 0)
+            (BATTERY_UNKNOWN, u8::MAX)
         }
     }
 }
 
-const BATTERY_DISCONNECTED: u8 = 0xFF;
-const BATTERY_WIRED: u8 = 0x00;
-const BATTERY_ALKALINE: u8 = 0x01;
-const BATTERY_NIMH: u8 = 0x02;
+fn query_bluetooth_battery_percent() -> Option<u8> {
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$keys = @('DEVPKEY_Device_BatteryLevel', '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2')
+$devices = Get-PnpDevice -PresentOnly | Where-Object {
+    ($_.Class -eq 'Bluetooth' -or $_.Class -eq 'HIDClass') -and
+    (
+        $_.FriendlyName -match '(?i)(xbox|controller|gamepad|8bitdo|joystick)' -or
+        $_.InstanceId -match '(?i)(VID_045E|IG_00|IG_01|BTHENUM\\DEV_)'
+    )
+}
+
+foreach ($device in $devices) {
+    foreach ($key in $keys) {
+        $property = Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName $key
+        if ($null -ne $property -and $property.Data -match '^\d+$') {
+            $value = [int]$property.Data
+            if ($value -ge 0 -and $value -le 100) {
+                Write-Output $value
+                exit 0
+            }
+        }
+    }
+}
+exit 1
+"#;
+
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().parse::<u8>().ok())
+        .filter(|value| *value <= 100)
+}
+
+fn query_battery(index: u32) -> (u8, u8) {
+    query_xinput_battery(index)
+}
+
+const BATTERY_DISCONNECTED: u8 = 0x00;
+const BATTERY_PERCENT: u8 = 0xFE;
+const BATTERY_UNKNOWN: u8 = 0xFF;
+const BATTERY_WIRED: u8 = 0x01;
+const BATTERY_ALKALINE: u8 = 0x02;
+const BATTERY_NIMH: u8 = 0x03;
 
 // Extract the raw bitmap data (BITMAPINFOHEADER + XOR mask + AND mask) for
 fn extract_icon_data(ico_bytes: &[u8]) -> Option<&[u8]> {
@@ -839,7 +899,9 @@ impl JoyMapperApp {
         let pressed_clone = pressed_inputs.clone();
         let connected_device = Arc::new(Mutex::new(false));
         let connected_clone = connected_device.clone();
+        let connected_battery = connected_device.clone();
         let ctx_clone = cc.egui_ctx.clone();
+        let ctx_battery = cc.egui_ctx.clone();
 
         let sound_engine = SoundEngine::new();
         let click_tx = sound_engine.sender();
@@ -856,8 +918,9 @@ impl JoyMapperApp {
         let connection_start = Arc::new(Mutex::new(std::time::Instant::now()));
         let connection_start_poll = connection_start.clone();
 
-        let battery_info = Arc::new(Mutex::new((0xFFu8, 0u8)));
+        let battery_info = Arc::new(Mutex::new((BATTERY_UNKNOWN, u8::MAX)));
         let battery_info_poll = battery_info.clone();
+        let battery_info_bluetooth = battery_info.clone();
 
         // Hardware Polling Thread (Full XInput coverage)
         std::thread::spawn(move || {
@@ -868,7 +931,7 @@ impl JoyMapperApp {
             let poll_interval = Duration::from_millis(1);
             let mut was_connected = false;
             let mut last_tray_update = std::time::Instant::now();
-            let mut last_battery_query = std::time::Instant::now();
+            let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
             let click_tx = click_tx;
             let sound_enabled = sound_enabled_poll;
             loop {
@@ -885,10 +948,14 @@ impl JoyMapperApp {
                     ctx_clone.request_repaint();
                 }
 
-                if connected && last_battery_query.elapsed() > Duration::from_secs(5) {
+                if connected && last_battery_query.elapsed() > Duration::from_secs(30) {
                     let (btype, blevel) = query_battery(0);
-                    *battery_info_poll.lock().unwrap() = (btype, blevel);
+                    let mut battery = battery_info_poll.lock().unwrap();
+                    if battery.0 != BATTERY_PERCENT || btype == BATTERY_WIRED {
+                        *battery = (btype, blevel);
+                    }
                     last_battery_query = std::time::Instant::now();
+                    ctx_clone.request_repaint();
                 }
 
                 if connected {
@@ -983,6 +1050,19 @@ impl JoyMapperApp {
                 }
                 std::thread::sleep(poll_interval);
             }
+        });
+
+        std::thread::spawn(move || loop {
+            if *connected_battery.lock().unwrap() {
+                if let Some(percent) = query_bluetooth_battery_percent() {
+                    let mut battery = battery_info_bluetooth.lock().unwrap();
+                    if battery.0 != BATTERY_WIRED && *battery != (BATTERY_PERCENT, percent) {
+                        *battery = (BATTERY_PERCENT, percent);
+                        ctx_battery.request_repaint();
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(30));
         });
 
         let mut app = Self {
@@ -1766,6 +1846,15 @@ impl eframe::App for JoyMapperApp {
                                 let (btype, blevel) = *self.state.battery_info.lock().unwrap();
                                 if btype == BATTERY_WIRED {
                                     ui.label("Power: wired");
+                                } else if btype == BATTERY_PERCENT {
+                                    let color = if blevel <= 15 {
+                                        colors.danger
+                                    } else if blevel <= 35 {
+                                        colors.warning
+                                    } else {
+                                        colors.success
+                                    };
+                                    ui.colored_label(color, format!("Battery: {}% (Bluetooth)", blevel));
                                 } else if btype == BATTERY_DISCONNECTED {
                                     ui.label("Battery: disconnected");
                                 } else if btype == BATTERY_ALKALINE || btype == BATTERY_NIMH {
@@ -1777,6 +1866,14 @@ impl eframe::App for JoyMapperApp {
                                         _ => (colors.success, "Full"),
                                     };
                                     ui.colored_label(color, format!("Battery: {} ({})", level_str, kind));
+                                } else if btype == BATTERY_UNKNOWN && blevel <= 3 {
+                                    let (color, level_str) = match blevel {
+                                        0 => (colors.danger, "Empty"),
+                                        1 => (colors.warning, "Low"),
+                                        2 => (colors.warning, "Medium"),
+                                        _ => (colors.success, "Full"),
+                                    };
+                                    ui.colored_label(color, format!("Battery: {} (wireless)", level_str));
                                 } else {
                                     ui.label("Battery: unknown");
                                 }
