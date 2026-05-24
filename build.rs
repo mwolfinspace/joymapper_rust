@@ -3,7 +3,7 @@ fn main() {
         let mut res = winres::WindowsResource::new();
 
         res.set("ProductName", "Controller Mapped");
-        res.set("FileDescription", "Lightweight hardware controller to keyboard macro mapper.");
+        res.set("FileDescription", "Joymapper Pro");
         res.set("CompanyName", "M-Wolf Studio");
         res.set("LegalCopyright", "© M-Wolf Studio");
         res.set_icon("app_icon.ico");
