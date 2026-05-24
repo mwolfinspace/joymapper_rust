@@ -23,6 +23,24 @@ static MAIN_HWND: AtomicUsize = AtomicUsize::new(0);
 
 // --- MASTER CONTROLLER LAYOUT ---
 // This guarantees a logical display order and ensures no buttons are ever missing.
+const DIGITAL_MAP: &[(&str, u16)] = &[
+    ("A", 0x1000),
+    ("B", 0x2000),
+    ("X", 0x4000),
+    ("Y", 0x8000),
+    ("DPAD_UP", 0x0001),
+    ("DPAD_DOWN", 0x0002),
+    ("DPAD_LEFT", 0x0004),
+    ("DPAD_RIGHT", 0x0008),
+    ("LB", 0x0100),
+    ("RB", 0x0200),
+    ("LS_CLICK", 0x0040),
+    ("RS_CLICK", 0x0080),
+    ("START", 0x0010),
+    ("BACK", 0x0020),
+    ("GUIDE", 0x0400),
+];
+
 const ALL_INPUTS: &[&str] = &[
     "A",
     "B",
@@ -959,11 +977,7 @@ impl JoyMapperApp {
 
         // Hardware Polling Thread (Full XInput coverage)
         std::thread::spawn(move || {
-            unsafe {
-                windows_sys::Win32::Media::timeBeginPeriod(1);
-            }
-
-            let poll_interval = Duration::from_millis(1);
+            let poll_interval = Duration::from_millis(4);
             let mut was_connected = false;
             let mut last_tray_update = std::time::Instant::now();
             let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
@@ -994,27 +1008,9 @@ impl JoyMapperApp {
                 }
 
                 if connected {
-                    let mut current_pressed: HashMap<String, bool> = HashMap::new();
+                    let mut current_pressed = HashMap::new();
 
-                    let digital_map = vec![
-                        ("A", 0x1000),
-                        ("B", 0x2000),
-                        ("X", 0x4000),
-                        ("Y", 0x8000),
-                        ("DPAD_UP", 0x0001),
-                        ("DPAD_DOWN", 0x0002),
-                        ("DPAD_LEFT", 0x0004),
-                        ("DPAD_RIGHT", 0x0008),
-                        ("LB", 0x0100),
-                        ("RB", 0x0200),
-                        ("LS_CLICK", 0x0040),
-                        ("RS_CLICK", 0x0080),
-                        ("START", 0x0010),
-                        ("BACK", 0x0020),
-                        ("GUIDE", 0x0400),
-                    ];
-
-                    for (name, flag) in digital_map {
+                    for (name, flag) in DIGITAL_MAP {
                         current_pressed.insert(name.to_string(), (buttons & flag) != 0);
                     }
 
