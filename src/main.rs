@@ -977,7 +977,12 @@ impl JoyMapperApp {
 
         // Hardware Polling Thread (Full XInput coverage)
         std::thread::spawn(move || {
-            let poll_interval = Duration::from_millis(4);
+            const FAST_MS: u64 = 4;
+            const SLOW_MS: u64 = 16;
+            const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+            let mut poll_interval = Duration::from_millis(FAST_MS);
+            let mut last_activity = std::time::Instant::now();
             let mut was_connected = false;
             let mut last_tray_update = std::time::Instant::now();
             let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
@@ -1005,6 +1010,12 @@ impl JoyMapperApp {
                     }
                     last_battery_query = std::time::Instant::now();
                     ctx_clone.request_repaint();
+                }
+
+                let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                let target = if is_idle { SLOW_MS } else { FAST_MS };
+                if poll_interval.as_millis() as u64 != target {
+                    poll_interval = Duration::from_millis(target);
                 }
 
                 if connected {
@@ -1066,8 +1077,8 @@ impl JoyMapperApp {
                     }
                     *lock = current_pressed;
 
-                    // Fire the repaint command instantly if you push or release a button
                     if state_changed {
+                        last_activity = std::time::Instant::now();
                         update_tray_icon("pressed");
                         last_tray_update = std::time::Instant::now();
                         ctx_clone.request_repaint();
