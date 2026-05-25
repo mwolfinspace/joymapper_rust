@@ -35,7 +35,7 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 
 ## 🖼️ Screenshot
 
-![JoyMapper Pro screenshot](screenshot.png)
+![JoyMapper Pro screenshot](Screenshot.png)
 
 *(Replace `Screenshot.png` with an actual screenshot of the app)*
 
@@ -49,7 +49,7 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 # Prerequisites: Rust toolchain (rustup, cargo)
 # Windows SDK (installed with Visual Studio Build Tools)
 
-git clone https://github.com/your-username/joymapper_rust.git
+git clone https://github.com/mwolfinspace/joymapper_rust.git
 cd joymapper_rust
 
 # Debug build
@@ -61,7 +61,7 @@ cargo build --release
 
 ### 📦 Download
 
-Pre-built binaries are available on the [Releases](https://github.com/your-username/joymapper_rust/releases) page.  
+Pre-built binaries are available on the [Releases](https://github.com/mwolfinspace/joymapper_rust/releases) page.  
 Just unzip and run `joymapper_rust.exe` — no installer needed.
 
 ---

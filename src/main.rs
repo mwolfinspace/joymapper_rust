@@ -471,8 +471,8 @@ fn win11_colors(is_dark: bool) -> Win11Colors {
             border: Color32::from_rgba_unmultiplied(0, 0, 0, 24),
             text: Color32::from_rgb(32, 32, 32),
             muted: Color32::from_rgb(96, 96, 96),
-            accent: Color32::from_rgb(0, 95, 184),
-            accent_soft: Color32::from_rgba_unmultiplied(0, 120, 212, 34),
+            accent: Color32::from_rgb(0, 103, 192),
+            accent_soft: Color32::from_rgba_unmultiplied(0, 103, 192, 26),
             success: Color32::from_rgb(16, 124, 16),
             danger: Color32::from_rgb(196, 43, 28),
             warning: Color32::from_rgb(157, 93, 0),
@@ -496,7 +496,7 @@ fn input_display_name(raw: &str) -> String {
         .replace('_', " ")
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Mappings,
     Settings,
@@ -1456,8 +1456,15 @@ impl eframe::App for JoyMapperApp {
 
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.state.active_tab, Tab::Mappings, "Mappings");
-                    ui.selectable_value(&mut self.state.active_tab, Tab::Settings, "Settings");
+                    let tabs = [("Mappings", Tab::Mappings), ("Settings", Tab::Settings)];
+                    for (label, tab) in &tabs {
+                        let selected = self.state.active_tab == *tab;
+                        let text_color = if selected { egui::Color32::WHITE } else { colors.text };
+                        let bg = if selected { colors.accent } else { egui::Color32::TRANSPARENT };
+                            if ui.add(egui::Button::new(egui::RichText::new(*label).color(text_color)).fill(bg)).clicked() {
+                            self.state.active_tab = *tab;
+                        }
+                    }
                 });
             });
 
