@@ -979,11 +979,14 @@ impl JoyMapperApp {
         std::thread::spawn(move || {
             const FAST_MS: u64 = 4;
             const SLOW_MS: u64 = 16;
+            const DISCONNECTED_POLL_MS: u64 = 2000;
             const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+            const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
             let mut poll_interval = Duration::from_millis(FAST_MS);
             let mut last_activity = std::time::Instant::now();
             let mut was_connected = false;
+            let mut last_connected_time = std::time::Instant::now();
             let mut last_tray_update = std::time::Instant::now();
             let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
             let click_tx = click_tx;
@@ -996,6 +999,8 @@ impl JoyMapperApp {
                     was_connected = connected;
                     if connected {
                         *connection_start_poll.lock().unwrap() = std::time::Instant::now();
+                    } else {
+                        last_connected_time = std::time::Instant::now();
                     }
                     update_tray_icon(if connected { "ready" } else { "disconnected" });
                     last_tray_update = std::time::Instant::now();
@@ -1012,8 +1017,14 @@ impl JoyMapperApp {
                     ctx_clone.request_repaint();
                 }
 
-                let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                let target = if is_idle { SLOW_MS } else { FAST_MS };
+                let target = if connected {
+                    let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                    if is_idle { SLOW_MS } else { FAST_MS }
+                } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
+                    DISCONNECTED_POLL_MS
+                } else {
+                    FAST_MS
+                };
                 if poll_interval.as_millis() as u64 != target {
                     poll_interval = Duration::from_millis(target);
                 }
