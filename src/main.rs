@@ -964,9 +964,8 @@ impl JoyMapperApp {
             const FAST_MS: u64 = 4;
             const SLOW_MS: u64 = 16;
             const DISCONNECTED_POLL_MS: u64 = 2000;
-            const TRAY_CONNECTED_MS: u64 = 250;
-            const TRAY_IDLE_MS: u64 = 500;
-            const TRAY_DISCONNECTED_MS: u64 = 5000;
+            const TRAY_CONNECTED_MS: u64 = 50;
+            const TRAY_IDLE_MS: u64 = 200;
             const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
             const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -996,16 +995,14 @@ impl JoyMapperApp {
                     }
                 }
 
-                if connected && last_battery_query.elapsed() > Duration::from_secs(30) {
+                if UI_VISIBLE.load(Ordering::Relaxed) && connected && last_battery_query.elapsed() > Duration::from_secs(30) {
                     let (btype, blevel) = query_battery(0);
                     let mut battery = battery_info_poll.lock().unwrap();
                     if battery.0 != BATTERY_PERCENT || btype == BATTERY_WIRED {
                         *battery = (btype, blevel);
                     }
                     last_battery_query = std::time::Instant::now();
-                    if UI_VISIBLE.load(Ordering::Relaxed) {
-                        ctx_clone.request_repaint();
-                    }
+                    ctx_clone.request_repaint();
                 }
 
                 let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
@@ -1013,8 +1010,6 @@ impl JoyMapperApp {
                     if connected {
                         let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
                         if is_idle { TRAY_IDLE_MS } else { TRAY_CONNECTED_MS }
-                    } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
-                        TRAY_DISCONNECTED_MS
                     } else {
                         DISCONNECTED_POLL_MS
                     }
