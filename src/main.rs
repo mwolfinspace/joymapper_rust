@@ -255,57 +255,39 @@ fn query_xinput_battery(index: u32) -> (u8, u8) {
 }
 
 fn query_bluetooth_battery_percent() -> Option<u8> {
-    let script = r#"
-$ErrorActionPreference = 'SilentlyContinue'
-$keys = @('DEVPKEY_Device_BatteryLevel', '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2')
-$devices = Get-PnpDevice -PresentOnly | Where-Object {
-    ($_.Class -eq 'Bluetooth' -or $_.Class -eq 'HIDClass') -and
-    (
-        $_.FriendlyName -match '(?i)(xbox|controller|gamepad|8bitdo|joystick)' -or
-        $_.InstanceId -match '(?i)(VID_045E|IG_00|IG_01|BTHENUM\\DEV_)'
-    )
-}
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let battery_prop = r"Properties\{104EA319-6EE2-4701-BD47-8DDBF425BBE5}\0002";
 
-foreach ($device in $devices) {
-    foreach ($key in $keys) {
-        $property = Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName $key
-        if ($null -ne $property -and $property.Data -match '^\d+$') {
-            $value = [int]$property.Data
-            if ($value -ge 0 -and $value -le 100) {
-                Write-Output $value
-                exit 0
+    // Enumerate BTHENUM devices (Bluetooth controllers)
+    let bthenum_path = r"SYSTEM\CurrentControlSet\Enum\BTHENUM";
+    let bthenum = hklm.open_subkey_with_flags(bthenum_path, KEY_READ).ok()?;
+
+    let controller_vids = ["VID_045E", "VID_057E", "VID_0F0D", "VID_054C", "VID_2DC8"];
+
+    for dev in bthenum.enum_keys().filter_map(|k| k.ok()) {
+        let is_controller = controller_vids.iter().any(|vid| dev.contains(vid))
+            || dev.to_lowercase().contains("gamepad")
+            || dev.to_lowercase().contains("controller");
+        if !is_controller {
+            continue;
+        }
+
+        let dev_path = format!(r"{}\{}", bthenum_path, dev);
+        if let Ok(inst_enum) = hklm.open_subkey_with_flags(&dev_path, KEY_READ) {
+            for inst in inst_enum.enum_keys().filter_map(|k| k.ok()) {
+                let prop_path = format!(r"{}\{}\{}", dev_path, inst, battery_prop);
+                if let Ok(prop) = hklm.open_subkey_with_flags(&prop_path, KEY_READ) {
+                    if let Ok(val) = prop.get_value::<u32, _>("(default)") {
+                        if val <= 100 {
+                            return Some(val as u8);
+                        }
+                    }
+                }
             }
         }
     }
-}
-exit 1
-"#;
 
-    let mut command = std::process::Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    ]);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.trim().parse::<u8>().ok())
-        .filter(|value| *value <= 100)
+    None
 }
 
 fn query_battery(index: u32) -> (u8, u8) {
