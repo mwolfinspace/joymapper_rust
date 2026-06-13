@@ -1852,8 +1852,6 @@ fn start_hardware_threads(
         const FAST_MS: u64 = 4;
         const SLOW_MS: u64 = 16;
         const DISCONNECTED_POLL_MS: u64 = 2000;
-        const TRAY_CONNECTED_MS: u64 = 50;
-        const TRAY_IDLE_MS: u64 = 200;
         const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
         const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -1896,22 +1894,13 @@ fn start_hardware_threads(
             }
 
             let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
-            let target = if !ui_visible {
-                if connected {
-                    let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                    if is_idle { TRAY_IDLE_MS } else { TRAY_CONNECTED_MS }
-                } else {
-                    DISCONNECTED_POLL_MS
-                }
+            let target = if connected {
+                let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                if is_idle { SLOW_MS } else { FAST_MS }
+            } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
+                DISCONNECTED_POLL_MS
             } else {
-                if connected {
-                    let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                    if is_idle { SLOW_MS } else { FAST_MS }
-                } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
-                    DISCONNECTED_POLL_MS
-                } else {
-                    FAST_MS
-                }
+                FAST_MS
             };
             if poll_interval.as_millis() as u64 != target {
                 poll_interval = Duration::from_millis(target);
