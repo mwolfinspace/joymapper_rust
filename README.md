@@ -22,7 +22,7 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 | 📂 **Per-Profile Files** | Each profile = one `.json` file in the exe directory. Copy, share, or edit them directly. No AppData, no registry bloat. |
 | 🔄 **Profile Management** | Switch, New, Rename, Delete, Import, Export — all self-contained in the exe folder |
 | ⭐ **Last-Used Priority** | Profiles carry a `last_used` flag; the app restores the last-active profile on startup |
-| 🖼️ **System Tray** | Minimizes to tray on close. Three custom tray icons (disconnected, ready, pressing). Left-click restores window. Right-click → Show Mapper / Exit. |
+| 🖼️ **System Tray** | The default mode hides to tray on launch (`start_minimized`). Two process modes: `--tray` (pure Win32, ~2 MB RAM) and `--ui` (full egui window, spawned on demand). RAM freed entirely when window closes. Three custom tray icons (disconnected, ready, pressing). |
 | 🔊 **Sound Feedback** | Plays a click on button press via a dedicated audio thread — works even while window is hidden (trayed) |
 | 🎨 **Win11 Mica Backdrop** | Translucent acrylic-style background using `window-vibrancy` + DwmSetWindowAttribute |
 | 🌓 **Theme Support** | System (auto-dark/light via registry), Dark, Light |
@@ -68,7 +68,7 @@ Just unzip and run `joymapper_rust.exe` — no installer needed.
 
 ## 🎯 Usage
 
-1. **Launch the app** — it sits in your system tray immediately
+1. **Launch the app** — by default it starts minimized to the system tray (lightweight `--tray` mode, ~2 MB RAM). Right-click the tray icon → *Show Mapper* or left-click to open the full UI.
 2. **Plug in an XInput controller** — the status indicator in the status bar turns green
 3. **Map your buttons**:
    - **Click a key cell** → the cell turns amber with a gold border → press the desired keyboard keys → instantly assigned to that slot ✨
@@ -78,6 +78,16 @@ Just unzip and run `joymapper_rust.exe` — no installer needed.
 4. **Switch profiles** via the dropdown in the toolbar
 5. **Import/Export, New, Rename, Delete** profiles from the toolbar
 6. **Settings tab**: toggle tray-on-close, startup launch, sound, and theme
+
+### 🚩 Launch Flags
+
+| Flag | Behaviour |
+|---|---|
+| *(none)* | Checks `config.json` — if `start_minimized: true` (default), runs `--tray` mode; otherwise opens the UI window. |
+| `--tray` | Pure Win32 tray mode: polling thread + key simulation only. No egui, no GL — ~2 MB RAM, ~0% CPU idle. Tray icon + "Show Mapper" menu. |
+| `--ui` | Opens the full egui configuration window. Skips `start_minimized` config. Only one UI instance allowed at a time (named mutex guard). |
+
+The app automatically switches modes: click *Show Mapper* → spawns `joymapper.exe --ui`; close the UI to tray → spawns `joymapper.exe --tray` and exits, freeing all egui/GL resources.
 
 ### 🎮 All Supported Inputs
 
@@ -155,48 +165,51 @@ Each input can hold **up to 10 simultaneous key strings** in an array:
 
 ## ⚙️ Technical Architecture
 
+The app runs as **two separate process modes**, never mixing them:
+
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    eframe / egui UI                      │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ Mappings Tab │  │ Settings Tab │  │ Rename Dialog │  │
-│  │  · ScrollArea│  │  · Tray      │  └───────────────┘  │
-│  │    + grid    │  │  · Startup   │                     │
-│  │  · Recorder  │  │  · Sound     │                     │
-│  │  · Context   │  │  · Theme     │                     │
-│  │    menu      │  └──────────────┘                     │
-│  └──────┬───────┘                                       │
-│         │                                               │
-│         └────────┬───────────────────────────────────────┘
-│                  ▼                                       │
-│           AppState (in-memory)                           │
-│  ┌──────────────────────────────────────────────────────┐│
-│  │  profiles: HashMap<String, Profile>                  ││
-│  │  active_mapping: Arc<Mutex<HashMap<String, Vec<...>>││
-│  └──────────────────────┬───────────────────────────────┘│
-└─────────────────────────┼────────────────────────────────┘
-                          │
-              ┌───────────┴───────────┐
-              ▼                       ▼
-    ┌─────────────────┐    ┌──────────────────────┐
-    │  save_to_disk()  │    │  Polling Thread      │
-    │  Writes .json    │    │  (250 Hz)            │
-    │  per profile     │    │                      │
-    └─────────────────┘    │  XInputGetState()     │
-                           │  → for each Vec<>     │
-                           │  → SendInput()        │
-                           │  → SoundEngine.send() │
-                           │  → update_tray_icon() │
-                           └──────────────────────┘
+  ┌─────────────────────────────────────────────────────┐
+  │                  joymapper.exe                       │
+  │                                                     │
+  │  ┌─────────────────────┐     ┌────────────────────┐ │
+  │  │  --tray / default   │     │  --ui (on demand)  │ │
+  │  │                     │     │                     │ │
+  │  │  · Win32 tray icon  │     │  · eframe / egui   │ │
+  │  │  · XInput polling   │     │  · Mappings Tab    │ │
+  │  │  · SendInput()      │     │  · Settings Tab    │ │
+  │  │  · Sound engine     │     │  · Recording       │ │
+  │  │  · ~2 MB RAM        │     │  · Profile mgmt    │ │
+  │  │  · ~0% CPU idle     │     │  · ~80 MB RAM      │ │
+  │  └──────────┬──────────┘     └───────┬────────────┘ │
+  │             │                        │              │
+  │             │  "Show Mapper"         │  close-to-   │
+  │             ├──── spawn --ui ───────►│  tray        │
+  │             │                        │              │
+  │             │◄─── spawn --tray ──────┤  spawn tray  │
+  │             │     then exit          │  + exit(0)   │
+  │             │                        │              │
+  └─────────────┴────────────────────────┴──────────────┘
 ```
+
+Key design: the egui/eframe process **does not stay alive** when the window is hidden. Closing to tray destroys the process entirely (all GL context, swapchain buffers, font atlas freed). The tray process uses pure Win32 — no egui dependencies, no GPU allocations, no window surface.
 
 ### 🧵 Thread Model
 
+**Tray mode** (`--tray`):
 | Thread | Role |
 |---|---|
-| **Main (egui)** | UI rendering, recording handler, profile management |
-| **Polling** | XInputGetState loop at ~250 Hz (`timeBeginPeriod(1)`), fires `SendInput` + sound + tray updates. For multi-key arrays: forward iteration on key-down, reverse on key-up. |
-| **Sound** | Decodes and plays `.wav` via rodio; receives triggers via `mpsc` channel (works even while window is hidden) |
+| **Main** | Sleeps (idle); wakes only on tray icon messages |
+| **Win32 message pump** | Hidden HWND_MESSAGE window, processes tray icon events |
+| **Polling** | XInputGetState loop (20 Hz active, 5 Hz idle, 2 s disconnected), fires `SendInput` + sound + tray updates. For multi-key arrays: forward iteration on key-down, reverse on key-up. |
+| **Sound** | Decodes and plays click via rodio; receives triggers via `mpsc` channel |
+| **Bluetooth battery** | Polls Bluetooth battery every 30 s |
+
+**UI mode** (`--ui`, spawned on demand):
+| Thread | Role |
+|---|---|
+| **Main (eframe/egui)** | UI rendering, recording handler, profile management, close-to-tray handler |
+| *(others)* | Polling, Sound, Bluetooth battery — same code as tray mode |
+| *(lifecycle)* | Exits entirely on close-to-tray. All resources freed, tray respawned as `--tray` process. |
 
 ### 🪟 No Console Window
 

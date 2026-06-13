@@ -601,8 +601,10 @@ unsafe extern "system" fn tray_wnd_proc(
                 if !main_hwnd.is_null() {
                     ShowWindow(main_hwnd, SW_RESTORE);
                     SetForegroundWindow(main_hwnd);
+                    WAKE_UP_UI.store(true, Ordering::SeqCst);
+                } else if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("--ui").spawn();
                 }
-                WAKE_UP_UI.store(true, Ordering::SeqCst);
             }
             WM_RBUTTONUP => {
                 let hmenu = CreatePopupMenu();
@@ -671,6 +673,8 @@ unsafe extern "system" fn tray_wnd_proc(
                 ShowWindow(main_hwnd, SW_RESTORE);
                 SetForegroundWindow(main_hwnd);
                 WAKE_UP_UI.store(true, Ordering::SeqCst);
+            } else if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe).arg("--ui").spawn();
             }
         } else if wparam == 102 {
             std::process::exit(0);
@@ -844,85 +848,7 @@ impl JoyMapperApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let tray_hicon = init_tray_icon();
 
-        // Scan the app's folder for .json profile files. Each file = one profile.
-        let dir = profiles_dir();
-        let mut profiles = HashMap::new();
-
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    if let Ok(data) = std::fs::read_to_string(&path) {
-                        if let Ok(profile) = serde_json::from_str::<Profile>(&data) {
-                            let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                            profiles.insert(name, profile);
-                        } else if let Ok(old) = serde_json::from_str::<OldProfile>(&data) {
-                            let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                            profiles.insert(name, Profile::from(old));
-                        }
-                    }
-                }
-            }
-        }
-
-        if profiles.is_empty() {
-            let mut default_mappings = HashMap::new();
-            for name in ALL_INPUTS {
-                default_mappings.insert(name.to_string(), default_mapping_vec());
-            }
-            let default = Profile {
-                mappings: default_mappings,
-                ..Default::default()
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&default) {
-                let _ = std::fs::write(dir.join("Default.json"), json);
-            }
-            profiles.insert("Default".to_string(), default);
-        }
-
-        // Repair missing inputs for any new controller buttons added later
-        for profile in profiles.values_mut() {
-            for name in ALL_INPUTS {
-                profile
-                    .mappings
-                    .entry(name.to_string())
-                    .or_insert_with(default_mapping_vec);
-            }
-        }
-
-        let current_profile_name = {
-            let mut flagged: Vec<String> = profiles
-                .iter()
-                .filter(|(_, p)| p.last_used)
-                .map(|(n, _)| n.clone())
-                .collect();
-
-            if flagged.len() > 1 {
-                // Multiple flags — pick alphabetically, clear the rest
-                flagged.sort();
-                for name in flagged.drain(1..) {
-                    if let Some(p) = profiles.get_mut(&name) {
-                        p.last_used = false;
-                        if let Ok(json) = serde_json::to_string_pretty(p) {
-                            let _ = std::fs::write(dir.join(format!("{}.json", &name)), json);
-                        }
-                    }
-                }
-            }
-
-            let chosen = if flagged.len() == 1 {
-                flagged[0].clone()
-            } else if profiles.contains_key("Default") {
-                "Default".to_string()
-            } else {
-                profiles.keys().next().unwrap().clone()
-            };
-
-            if let Some(p) = profiles.get_mut(&chosen) {
-                p.last_used = true;
-            }
-            chosen
-        };
+        let (profiles, current_profile_name) = load_profiles();
 
         let initial_mapping = profiles
             .get(&current_profile_name)
@@ -930,197 +856,31 @@ impl JoyMapperApp {
             .mappings
             .clone();
         let active_mapping = Arc::new(Mutex::new(initial_mapping));
-        let mapping_clone = active_mapping.clone();
 
         let pressed_inputs = Arc::new(Mutex::new(HashMap::new()));
-        let pressed_clone = pressed_inputs.clone();
         let connected_device = Arc::new(Mutex::new(false));
-        let connected_clone = connected_device.clone();
-        let connected_battery = connected_device.clone();
-        let ctx_clone = cc.egui_ctx.clone();
-        let ctx_battery = cc.egui_ctx.clone();
-
-        let sound_engine = SoundEngine::new();
-        let click_tx = sound_engine.sender();
-        let sound_enabled = Arc::new(AtomicBool::new(true));
-        let sound_enabled_poll = sound_enabled.clone();
-
+        let battery_info = Arc::new(Mutex::new((BATTERY_UNKNOWN, u8::MAX)));
+        let connection_start = Arc::new(Mutex::new(std::time::Instant::now()));
         let key_press_counter = Arc::new(AtomicU64::new(
             profiles
                 .get(&current_profile_name)
                 .map_or(0, |p| p.total_key_presses),
         ));
-        let key_counter_poll = key_press_counter.clone();
+        let sound_enabled = Arc::new(AtomicBool::new(true));
+        let sound_engine = SoundEngine::new();
+        let click_tx = sound_engine.sender();
 
-        let connection_start = Arc::new(Mutex::new(std::time::Instant::now()));
-        let connection_start_poll = connection_start.clone();
-
-        let battery_info = Arc::new(Mutex::new((BATTERY_UNKNOWN, u8::MAX)));
-        let battery_info_poll = battery_info.clone();
-        let battery_info_bluetooth = battery_info.clone();
-
-        // Hardware Polling Thread (Full XInput coverage)
-        std::thread::spawn(move || {
-            const FAST_MS: u64 = 4;
-            const SLOW_MS: u64 = 16;
-            const DISCONNECTED_POLL_MS: u64 = 2000;
-            const TRAY_CONNECTED_MS: u64 = 50;
-            const TRAY_IDLE_MS: u64 = 200;
-            const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-            const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-
-            let mut poll_interval = Duration::from_millis(FAST_MS);
-            let mut last_activity = std::time::Instant::now();
-            let mut was_connected = false;
-            let mut last_connected_time = std::time::Instant::now();
-            let mut last_tray_update = std::time::Instant::now();
-            let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
-            let click_tx = click_tx;
-            let sound_enabled = sound_enabled_poll;
-            loop {
-                let (connected, buttons, lx, ly, rx, ry, lt, rt) = check_controller_full(0);
-
-                if connected != was_connected {
-                    *connected_clone.lock().unwrap() = connected;
-                    was_connected = connected;
-                    if connected {
-                        *connection_start_poll.lock().unwrap() = std::time::Instant::now();
-                    } else {
-                        last_connected_time = std::time::Instant::now();
-                    }
-                    update_tray_icon(if connected { "ready" } else { "disconnected" });
-                    last_tray_update = std::time::Instant::now();
-                    if UI_VISIBLE.load(Ordering::Relaxed) {
-                        ctx_clone.request_repaint();
-                    }
-                }
-
-                if UI_VISIBLE.load(Ordering::Relaxed) && connected && last_battery_query.elapsed() > Duration::from_secs(30) {
-                    let (btype, blevel) = query_battery(0);
-                    let mut battery = battery_info_poll.lock().unwrap();
-                    if battery.0 != BATTERY_PERCENT || btype == BATTERY_WIRED {
-                        *battery = (btype, blevel);
-                    }
-                    last_battery_query = std::time::Instant::now();
-                    ctx_clone.request_repaint();
-                }
-
-                let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
-                let target = if !ui_visible {
-                    if connected {
-                        let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                        if is_idle { TRAY_IDLE_MS } else { TRAY_CONNECTED_MS }
-                    } else {
-                        DISCONNECTED_POLL_MS
-                    }
-                } else {
-                    if connected {
-                        let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                        if is_idle { SLOW_MS } else { FAST_MS }
-                    } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
-                        DISCONNECTED_POLL_MS
-                    } else {
-                        FAST_MS
-                    }
-                };
-                if poll_interval.as_millis() as u64 != target {
-                    poll_interval = Duration::from_millis(target);
-                }
-
-                if connected {
-                    let mut current_pressed = HashMap::new();
-
-                    for (name, flag) in DIGITAL_MAP {
-                        current_pressed.insert(name.to_string(), (buttons & flag) != 0);
-                    }
-
-                    current_pressed.insert("LT".to_string(), lt > 128);
-                    current_pressed.insert("RT".to_string(), rt > 128);
-                    current_pressed.insert("LS_UP".to_string(), ly > 16000);
-                    current_pressed.insert("LS_DOWN".to_string(), ly < -16000);
-                    current_pressed.insert("LS_LEFT".to_string(), lx < -16000);
-                    current_pressed.insert("LS_RIGHT".to_string(), lx > 16000);
-                    current_pressed.insert("RS_UP".to_string(), ry > 16000);
-                    current_pressed.insert("RS_DOWN".to_string(), ry < -16000);
-                    current_pressed.insert("RS_LEFT".to_string(), rx < -16000);
-                    current_pressed.insert("RS_RIGHT".to_string(), rx > 16000);
-
-                    let mut lock = pressed_clone.lock().unwrap();
-                    let macro_map = mapping_clone.lock().unwrap();
-
-                    let mut state_changed = false;
-
-                    for (name, is_pressed) in &current_pressed {
-                        let was_pressed = *lock.get(name).unwrap_or(&false);
-                        if *is_pressed && !was_pressed {
-                            if let Some(keys_vec) = macro_map.get(name) {
-                                for key_str in keys_vec {
-                                    if !key_str.is_empty() {
-                                        for part in key_str.split('+') {
-                                            if let Some(vk) = parse_key_string(part) {
-                                                simulate_key(vk, false);
-                                                key_counter_poll.fetch_add(1, Ordering::Relaxed);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if sound_enabled.load(Ordering::SeqCst) {
-                                let _ = click_tx.send(());
-                            }
-                            state_changed = true;
-                        } else if !*is_pressed && was_pressed {
-                            if let Some(keys_vec) = macro_map.get(name) {
-                                for key_str in keys_vec.iter().rev() {
-                                    if !key_str.is_empty() {
-                                        for part in key_str.split('+').rev() {
-                                            if let Some(vk) = parse_key_string(part) {
-                                                simulate_key(vk, true);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            state_changed = true;
-                        }
-                    }
-                    *lock = current_pressed;
-
-                    if state_changed {
-                        last_activity = std::time::Instant::now();
-                        if ui_visible {
-                            ctx_clone.request_repaint();
-                        }
-                        if last_tray_update.elapsed() > Duration::from_millis(200) {
-                            update_tray_icon("pressed");
-                            last_tray_update = std::time::Instant::now();
-                        }
-                    } else if last_tray_update.elapsed() > std::time::Duration::from_millis(1000) {
-                        update_tray_icon("ready");
-                        last_tray_update = std::time::Instant::now();
-                    }
-                } else if last_tray_update.elapsed() > std::time::Duration::from_millis(1000) {
-                    if ui_visible || !was_connected {
-                        update_tray_icon("disconnected");
-                    }
-                    last_tray_update = std::time::Instant::now();
-                }
-                std::thread::sleep(poll_interval);
-            }
-        });
-
-        std::thread::spawn(move || loop {
-            if *connected_battery.lock().unwrap() {
-                if let Some(percent) = query_bluetooth_battery_percent() {
-                    let mut battery = battery_info_bluetooth.lock().unwrap();
-                    if battery.0 != BATTERY_WIRED && *battery != (BATTERY_PERCENT, percent) {
-                        *battery = (BATTERY_PERCENT, percent);
-                        ctx_battery.request_repaint();
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_secs(30));
-        });
+        start_hardware_threads(
+            Some(cc.egui_ctx.clone()),
+            connected_device.clone(),
+            pressed_inputs.clone(),
+            active_mapping.clone(),
+            key_press_counter.clone(),
+            connection_start.clone(),
+            battery_info.clone(),
+            click_tx,
+            sound_enabled.clone(),
+        );
 
         let config = load_config();
 
@@ -1131,7 +891,7 @@ impl JoyMapperApp {
                 active_tab: Tab::Mappings,
                 theme: AppTheme::System,
                 close_to_tray: true,
-                start_minimized: config.start_minimized,
+                start_minimized: if std::env::args().any(|a| a == "--ui") { false } else { config.start_minimized },
                 run_at_startup: false,
                 is_paused: false,
                 connected_device,
@@ -1150,7 +910,7 @@ impl JoyMapperApp {
             },
             tray_hicon,
             sound_engine,
-            window_visible: !config.start_minimized,
+            window_visible: if std::env::args().any(|a| a == "--ui") { true } else { !config.start_minimized },
         };
 
         app.state.save_to_disk();
@@ -1294,9 +1054,13 @@ impl eframe::App for JoyMapperApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.state.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.window_visible = false;
-                UI_VISIBLE.store(false, Ordering::Relaxed);
+                self.state.save_to_disk();
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe)
+                        .arg("--tray")
+                        .spawn();
+                }
+                std::process::exit(0);
             }
         }
 
@@ -2051,8 +1815,350 @@ impl eframe::App for JoyMapperApp {
     }
 }
 
+fn start_hardware_threads(
+    ctx: Option<egui::Context>,
+    connected_device: Arc<Mutex<bool>>,
+    pressed_inputs: Arc<Mutex<HashMap<String, bool>>>,
+    active_mapping: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    key_press_counter: Arc<AtomicU64>,
+    connection_start: Arc<Mutex<std::time::Instant>>,
+    battery_info: Arc<Mutex<(u8, u8)>>,
+    click_tx: std::sync::mpsc::Sender<()>,
+    sound_enabled: Arc<AtomicBool>,
+) {
+    let ctx_poll = ctx.clone();
+    let connected_poll = connected_device.clone();
+    let battery_poll = battery_info.clone();
+    // Hardware Polling Thread (Full XInput coverage)
+    std::thread::spawn(move || {
+        const FAST_MS: u64 = 4;
+        const SLOW_MS: u64 = 16;
+        const DISCONNECTED_POLL_MS: u64 = 2000;
+        const TRAY_CONNECTED_MS: u64 = 50;
+        const TRAY_IDLE_MS: u64 = 200;
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+        const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+        let mut poll_interval = Duration::from_millis(FAST_MS);
+        let mut last_activity = std::time::Instant::now();
+        let mut was_connected = false;
+        let mut last_connected_time = std::time::Instant::now();
+        let mut last_tray_update = std::time::Instant::now();
+        let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
+        loop {
+            let (connected, buttons, lx, ly, rx, ry, lt, rt) = check_controller_full(0);
+
+            if connected != was_connected {
+                *connected_poll.lock().unwrap() = connected;
+                was_connected = connected;
+                if connected {
+                    *connection_start.lock().unwrap() = std::time::Instant::now();
+                } else {
+                    last_connected_time = std::time::Instant::now();
+                }
+                update_tray_icon(if connected { "ready" } else { "disconnected" });
+                last_tray_update = std::time::Instant::now();
+                if let Some(ref ctx) = ctx_poll {
+                    if UI_VISIBLE.load(Ordering::Relaxed) {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+
+            if let Some(ref ctx) = ctx_poll {
+                if UI_VISIBLE.load(Ordering::Relaxed) && connected && last_battery_query.elapsed() > Duration::from_secs(30) {
+                    let (btype, blevel) = query_battery(0);
+                    let mut battery = battery_poll.lock().unwrap();
+                    if battery.0 != BATTERY_PERCENT || btype == BATTERY_WIRED {
+                        *battery = (btype, blevel);
+                    }
+                    last_battery_query = std::time::Instant::now();
+                    ctx.request_repaint();
+                }
+            }
+
+            let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
+            let target = if !ui_visible {
+                if connected {
+                    let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                    if is_idle { TRAY_IDLE_MS } else { TRAY_CONNECTED_MS }
+                } else {
+                    DISCONNECTED_POLL_MS
+                }
+            } else {
+                if connected {
+                    let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                    if is_idle { SLOW_MS } else { FAST_MS }
+                } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
+                    DISCONNECTED_POLL_MS
+                } else {
+                    FAST_MS
+                }
+            };
+            if poll_interval.as_millis() as u64 != target {
+                poll_interval = Duration::from_millis(target);
+            }
+
+            if connected {
+                let mut current_pressed = HashMap::new();
+
+                for (name, flag) in DIGITAL_MAP {
+                    current_pressed.insert(name.to_string(), (buttons & flag) != 0);
+                }
+
+                current_pressed.insert("LT".to_string(), lt > 128);
+                current_pressed.insert("RT".to_string(), rt > 128);
+                current_pressed.insert("LS_UP".to_string(), ly > 16000);
+                current_pressed.insert("LS_DOWN".to_string(), ly < -16000);
+                current_pressed.insert("LS_LEFT".to_string(), lx < -16000);
+                current_pressed.insert("LS_RIGHT".to_string(), lx > 16000);
+                current_pressed.insert("RS_UP".to_string(), ry > 16000);
+                current_pressed.insert("RS_DOWN".to_string(), ry < -16000);
+                current_pressed.insert("RS_LEFT".to_string(), rx < -16000);
+                current_pressed.insert("RS_RIGHT".to_string(), rx > 16000);
+
+                let mut lock = pressed_inputs.lock().unwrap();
+                let macro_map = active_mapping.lock().unwrap();
+
+                let mut state_changed = false;
+
+                for (name, is_pressed) in &current_pressed {
+                    let was_pressed = *lock.get(name).unwrap_or(&false);
+                    if *is_pressed && !was_pressed {
+                        if let Some(keys_vec) = macro_map.get(name) {
+                            for key_str in keys_vec {
+                                if !key_str.is_empty() {
+                                    for part in key_str.split('+') {
+                                        if let Some(vk) = parse_key_string(part) {
+                                            simulate_key(vk, false);
+                                            key_press_counter.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if sound_enabled.load(Ordering::SeqCst) {
+                            let _ = click_tx.send(());
+                        }
+                        state_changed = true;
+                    } else if !*is_pressed && was_pressed {
+                        if let Some(keys_vec) = macro_map.get(name) {
+                            for key_str in keys_vec.iter().rev() {
+                                if !key_str.is_empty() {
+                                    for part in key_str.split('+').rev() {
+                                        if let Some(vk) = parse_key_string(part) {
+                                            simulate_key(vk, true);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        state_changed = true;
+                    }
+                }
+                *lock = current_pressed;
+
+                if state_changed {
+                    last_activity = std::time::Instant::now();
+                    if ui_visible {
+                        if let Some(ref ctx) = ctx_poll {
+                            ctx.request_repaint();
+                        }
+                    }
+                    if last_tray_update.elapsed() > Duration::from_millis(200) {
+                        update_tray_icon("pressed");
+                        last_tray_update = std::time::Instant::now();
+                    }
+                } else if last_tray_update.elapsed() > std::time::Duration::from_millis(1000) {
+                    update_tray_icon("ready");
+                    last_tray_update = std::time::Instant::now();
+                }
+            } else if last_tray_update.elapsed() > std::time::Duration::from_millis(1000) {
+                if ui_visible || !was_connected {
+                    update_tray_icon("disconnected");
+                }
+                last_tray_update = std::time::Instant::now();
+            }
+            std::thread::sleep(poll_interval);
+        }
+    });
+
+    // Bluetooth battery thread
+    std::thread::spawn(move || {
+        let ctx_battery = ctx;
+        loop {
+            if *connected_device.lock().unwrap() {
+                if let Some(percent) = query_bluetooth_battery_percent() {
+                    let mut battery = battery_info.lock().unwrap();
+                    if battery.0 != BATTERY_WIRED && *battery != (BATTERY_PERCENT, percent) {
+                        *battery = (BATTERY_PERCENT, percent);
+                        if let Some(ref ctx) = ctx_battery {
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+}
+
+fn load_profiles() -> (HashMap<String, Profile>, String) {
+    let dir = profiles_dir();
+    let mut profiles = HashMap::new();
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    if let Ok(profile) = serde_json::from_str::<Profile>(&data) {
+                        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                        profiles.insert(name, profile);
+                    } else if let Ok(old) = serde_json::from_str::<OldProfile>(&data) {
+                        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                        profiles.insert(name, Profile::from(old));
+                    }
+                }
+            }
+        }
+    }
+
+    if profiles.is_empty() {
+        let mut default_mappings = HashMap::new();
+        for name in ALL_INPUTS {
+            default_mappings.insert(name.to_string(), default_mapping_vec());
+        }
+        let default = Profile {
+            mappings: default_mappings,
+            ..Default::default()
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&default) {
+            let _ = std::fs::write(dir.join("Default.json"), json);
+        }
+        profiles.insert("Default".to_string(), default);
+    }
+
+    for profile in profiles.values_mut() {
+        for name in ALL_INPUTS {
+            profile
+                .mappings
+                .entry(name.to_string())
+                .or_insert_with(default_mapping_vec);
+        }
+    }
+
+    let current_profile_name = {
+        let mut flagged: Vec<String> = profiles
+            .iter()
+            .filter(|(_, p)| p.last_used)
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        if flagged.len() > 1 {
+            flagged.sort();
+            for name in flagged.drain(1..) {
+                if let Some(p) = profiles.get_mut(&name) {
+                    p.last_used = false;
+                    if let Ok(json) = serde_json::to_string_pretty(p) {
+                        let _ = std::fs::write(dir.join(format!("{}.json", &name)), json);
+                    }
+                }
+            }
+        }
+
+        let chosen = if flagged.len() == 1 {
+            flagged[0].clone()
+        } else if profiles.contains_key("Default") {
+            "Default".to_string()
+        } else {
+            profiles.keys().next().unwrap().clone()
+        };
+
+        if let Some(p) = profiles.get_mut(&chosen) {
+            p.last_used = true;
+        }
+        chosen
+    };
+
+    (profiles, current_profile_name)
+}
+
+fn run_tray_mode() {
+    init_tray_icon();
+
+    let (profiles, current_profile_name) = load_profiles();
+
+    let initial_mapping = profiles
+        .get(&current_profile_name)
+        .unwrap()
+        .mappings
+        .clone();
+    let active_mapping = Arc::new(Mutex::new(initial_mapping));
+    let pressed_inputs = Arc::new(Mutex::new(HashMap::new()));
+    let connected_device = Arc::new(Mutex::new(false));
+    let battery_info = Arc::new(Mutex::new((BATTERY_UNKNOWN, u8::MAX)));
+    let connection_start = Arc::new(Mutex::new(std::time::Instant::now()));
+    let key_press_counter = Arc::new(AtomicU64::new(
+        profiles
+            .get(&current_profile_name)
+            .map_or(0, |p| p.total_key_presses),
+    ));
+    let sound_enabled = Arc::new(AtomicBool::new(true));
+    let click_tx = {
+        let sound_engine = SoundEngine::new();
+        sound_engine.sender()
+    };
+
+    start_hardware_threads(
+        None,
+        connected_device,
+        pressed_inputs,
+        active_mapping,
+        key_press_counter,
+        connection_start,
+        battery_info,
+        click_tx,
+        sound_enabled,
+    );
+
+    loop {
+        std::thread::sleep(Duration::from_secs(u64::MAX));
+    }
+}
+
 fn main() -> eframe::Result<()> {
-    let config = load_config();
+    if std::env::args().any(|a| a == "--tray") {
+        run_tray_mode();
+        return Ok(());
+    }
+
+    // Without --ui, check config: start minimized → go straight to tray
+    let start_visible = if std::env::args().any(|a| a == "--ui") {
+        true
+    } else {
+        let config = load_config();
+        if config.start_minimized {
+            run_tray_mode();
+            return Ok(());
+        }
+        !config.start_minimized
+    };
+
+    // Single-instance guard: only one UI process at a time
+    unsafe {
+        let mutex = windows_sys::Win32::System::Threading::CreateMutexW(
+            std::ptr::null_mut(),
+            0,
+            windows_sys::w!("JoyMapperProUIMutex"),
+        );
+        if mutex.is_null()
+            || windows_sys::Win32::Foundation::GetLastError()
+                == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
+        {
+            return Ok(());
+        }
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -2060,7 +2166,7 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([620.0, 520.0])
             .with_decorations(true)
             .with_transparent(true)
-            .with_visible(!config.start_minimized),
+            .with_visible(start_visible),
         persist_window: true,
         ..Default::default()
     };
