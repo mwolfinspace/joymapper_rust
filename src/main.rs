@@ -1055,10 +1055,28 @@ impl eframe::App for JoyMapperApp {
             if self.state.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.state.save_to_disk();
-                if let Ok(exe) = std::env::current_exe() {
-                    let _ = std::process::Command::new(exe)
-                        .arg("--tray")
-                        .spawn();
+
+                // If a tray process is already alive, just exit — don't spawn another
+                let tray_running = unsafe {
+                    let handle = windows_sys::Win32::System::Threading::OpenMutexW(
+                        0x00100000,
+                        0i32,
+                        windows_sys::w!("JoyMapperProTrayMutex"),
+                    );
+                    if !handle.is_null() {
+                        windows_sys::Win32::Foundation::CloseHandle(handle);
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if !tray_running {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(exe)
+                            .arg("--tray")
+                            .spawn();
+                    }
                 }
                 std::process::exit(0);
             }
@@ -2085,6 +2103,14 @@ fn load_profiles() -> (HashMap<String, Profile>, String) {
 }
 
 fn run_tray_mode() {
+    // Signal: a tray process is alive (UI checks this before spawning another)
+    unsafe {
+        windows_sys::Win32::System::Threading::CreateMutexW(
+            std::ptr::null_mut(),
+            0,
+            windows_sys::w!("JoyMapperProTrayMutex"),
+        );
+    }
     init_tray_icon();
 
     let (profiles, current_profile_name) = load_profiles();
