@@ -13,6 +13,7 @@ use std::time::Duration;
 use winreg::enums::*;
 use winreg::RegKey;
 
+static UI_VISIBLE: AtomicBool = AtomicBool::new(true);
 static WAKE_UP_UI: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
 static TRAY_APP_ICON: AtomicUsize = AtomicUsize::new(0); // fallback / window icon
@@ -830,6 +831,7 @@ struct JoyMapperApp {
     state: AppState,
     tray_hicon: isize,
     sound_engine: SoundEngine,
+    window_visible: bool,
 }
 
 impl Drop for JoyMapperApp {
@@ -962,6 +964,9 @@ impl JoyMapperApp {
             const FAST_MS: u64 = 4;
             const SLOW_MS: u64 = 16;
             const DISCONNECTED_POLL_MS: u64 = 2000;
+            const TRAY_CONNECTED_MS: u64 = 250;
+            const TRAY_IDLE_MS: u64 = 500;
+            const TRAY_DISCONNECTED_MS: u64 = 5000;
             const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
             const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -986,7 +991,9 @@ impl JoyMapperApp {
                     }
                     update_tray_icon(if connected { "ready" } else { "disconnected" });
                     last_tray_update = std::time::Instant::now();
-                    ctx_clone.request_repaint();
+                    if UI_VISIBLE.load(Ordering::Relaxed) {
+                        ctx_clone.request_repaint();
+                    }
                 }
 
                 if connected && last_battery_query.elapsed() > Duration::from_secs(30) {
@@ -996,16 +1003,30 @@ impl JoyMapperApp {
                         *battery = (btype, blevel);
                     }
                     last_battery_query = std::time::Instant::now();
-                    ctx_clone.request_repaint();
+                    if UI_VISIBLE.load(Ordering::Relaxed) {
+                        ctx_clone.request_repaint();
+                    }
                 }
 
-                let target = if connected {
-                    let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                    if is_idle { SLOW_MS } else { FAST_MS }
-                } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
-                    DISCONNECTED_POLL_MS
+                let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
+                let target = if !ui_visible {
+                    if connected {
+                        let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                        if is_idle { TRAY_IDLE_MS } else { TRAY_CONNECTED_MS }
+                    } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
+                        TRAY_DISCONNECTED_MS
+                    } else {
+                        DISCONNECTED_POLL_MS
+                    }
                 } else {
-                    FAST_MS
+                    if connected {
+                        let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
+                        if is_idle { SLOW_MS } else { FAST_MS }
+                    } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
+                        DISCONNECTED_POLL_MS
+                    } else {
+                        FAST_MS
+                    }
                 };
                 if poll_interval.as_millis() as u64 != target {
                     poll_interval = Duration::from_millis(target);
@@ -1072,15 +1093,21 @@ impl JoyMapperApp {
 
                     if state_changed {
                         last_activity = std::time::Instant::now();
-                        update_tray_icon("pressed");
-                        last_tray_update = std::time::Instant::now();
-                        ctx_clone.request_repaint();
+                        if ui_visible {
+                            ctx_clone.request_repaint();
+                        }
+                        if last_tray_update.elapsed() > Duration::from_millis(200) {
+                            update_tray_icon("pressed");
+                            last_tray_update = std::time::Instant::now();
+                        }
                     } else if last_tray_update.elapsed() > std::time::Duration::from_millis(1000) {
                         update_tray_icon("ready");
                         last_tray_update = std::time::Instant::now();
                     }
                 } else if last_tray_update.elapsed() > std::time::Duration::from_millis(1000) {
-                    update_tray_icon("disconnected");
+                    if ui_visible || !was_connected {
+                        update_tray_icon("disconnected");
+                    }
                     last_tray_update = std::time::Instant::now();
                 }
                 std::thread::sleep(poll_interval);
@@ -1128,6 +1155,7 @@ impl JoyMapperApp {
             },
             tray_hicon,
             sound_engine,
+            window_visible: !config.start_minimized,
         };
 
         app.state.save_to_disk();
@@ -1241,12 +1269,16 @@ impl eframe::App for JoyMapperApp {
         if WAKE_UP_UI.swap(false, Ordering::SeqCst) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.window_visible = true;
+            UI_VISIBLE.store(true, Ordering::Relaxed);
             ctx.request_repaint();
         }
 
         if !self.state.window_configured {
             if self.state.start_minimized {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
+                UI_VISIBLE.store(false, Ordering::Relaxed);
             }
 
             if let Ok(handle) = frame.window_handle() {
@@ -1268,7 +1300,15 @@ impl eframe::App for JoyMapperApp {
             if self.state.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
+                UI_VISIBLE.store(false, Ordering::Relaxed);
             }
+        }
+
+        // --- EARLY RETURN WHEN HIDDEN TO TRAY ---
+        if !self.window_visible && self.state.rename_target.is_none() {
+            ctx.request_repaint_after(Duration::from_millis(500));
+            return;
         }
 
         // --- 2. THEME & MACRO LOGIC ---
