@@ -1,5 +1,8 @@
 #![windows_subsystem = "windows"] // Hides the console window in both debug and release builds
 
+mod admin;
+mod autostart;
+
 use eframe::egui;
 use eframe::epaint::Color32;
 use raw_window_handle::HasWindowHandle;
@@ -919,26 +922,16 @@ impl JoyMapperApp {
     }
 
     fn check_startup_registry(&mut self) {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(run_key) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run") {
-            let val: Result<String, _> = run_key.get_value("JoyMapperRust");
-            self.state.run_at_startup = val.is_ok();
-        }
+        self.state.run_at_startup = autostart::is_enabled();
     }
 
     fn toggle_startup(&self, enabled: bool) {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok((run_key, _)) =
-            hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
-        {
-            if enabled {
-                if let Ok(exe_path) = std::env::current_exe() {
-                    let _ =
-                        run_key.set_value("JoyMapperRust", &exe_path.to_string_lossy().to_string());
-                }
-            } else {
-                let _ = run_key.delete_value("JoyMapperRust");
+        if enabled {
+            if let Ok(exe_path) = std::env::current_exe() {
+                let _ = autostart::enable(&exe_path);
             }
+        } else {
+            let _ = autostart::disable();
         }
     }
 
@@ -2143,6 +2136,33 @@ fn run_tray_mode() {
 }
 
 fn main() -> eframe::Result<()> {
+    // Self-elevate to admin if not already
+    if !admin::is_admin() {
+        admin::self_elevate();
+    }
+
+    // Singleton: only one instance allowed
+    unsafe {
+        let mutex = windows_sys::Win32::System::Threading::CreateMutexW(
+            std::ptr::null_mut(),
+            0,
+            windows_sys::w!("JoyMapperProAdminMutex"),
+        );
+        if mutex.is_null()
+            || windows_sys::Win32::Foundation::GetLastError()
+                == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
+        {
+            return Ok(());
+        }
+    }
+
+    // Validate auto-start task path if enabled
+    if autostart::is_enabled() {
+        if let Ok(exe) = std::env::current_exe() {
+            autostart::validate_and_fix(&exe);
+        }
+    }
+
     if std::env::args().any(|a| a == "--tray") {
         run_tray_mode();
         return Ok(());
