@@ -2136,31 +2136,10 @@ fn run_tray_mode() {
 }
 
 fn main() -> eframe::Result<()> {
-    // Self-elevate to admin if not already
-    if !admin::is_admin() {
+    // Self-elevate to admin (skipped in --tray mode: the UI process already
+    // spawns --tray while elevated, so re-elevating would show a spurious UAC)
+    if !std::env::args().any(|a| a == "--tray") && !admin::is_admin() {
         admin::self_elevate();
-    }
-
-    // Singleton: only one instance allowed
-    unsafe {
-        let mutex = windows_sys::Win32::System::Threading::CreateMutexW(
-            std::ptr::null_mut(),
-            0,
-            windows_sys::w!("JoyMapperProAdminMutex"),
-        );
-        if mutex.is_null()
-            || windows_sys::Win32::Foundation::GetLastError()
-                == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
-        {
-            return Ok(());
-        }
-    }
-
-    // Validate auto-start task path if enabled
-    if autostart::is_enabled() {
-        if let Ok(exe) = std::env::current_exe() {
-            autostart::validate_and_fix(&exe);
-        }
     }
 
     if std::env::args().any(|a| a == "--tray") {
@@ -2179,6 +2158,13 @@ fn main() -> eframe::Result<()> {
         }
         !config.start_minimized
     };
+
+    // Validate auto-start task path if enabled (UI mode only)
+    if autostart::is_enabled() {
+        if let Ok(exe) = std::env::current_exe() {
+            autostart::validate_and_fix(&exe);
+        }
+    }
 
     // Single-instance guard: only one UI process at a time
     unsafe {
