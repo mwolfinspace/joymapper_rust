@@ -17,13 +17,30 @@ use winreg::enums::*;
 use winreg::RegKey;
 
 static UI_VISIBLE: AtomicBool = AtomicBool::new(true);
-static WAKE_UP_UI: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
 static TRAY_APP_ICON: AtomicUsize = AtomicUsize::new(0); // fallback / window icon
 static TRAY_ICON_DIS: AtomicUsize = AtomicUsize::new(0);
 static TRAY_ICON_READY: AtomicUsize = AtomicUsize::new(0);
 static TRAY_ICON_PRESSING: AtomicUsize = AtomicUsize::new(0);
-static MAIN_HWND: AtomicUsize = AtomicUsize::new(0);
+
+// Only the tray process registers a shell tray icon (NIM_ADD). The UI process
+// must never add one, otherwise opening the window produces a second icon.
+static TRAY_OWNER: AtomicBool = AtomicBool::new(false);
+
+// Persisted pause state, mirrored from config.json by every process so the
+// tray process and the UI process always agree on whether input is remapped.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+// Auto-reset event: "please show / restore the mapper window".
+static SHOW_UI_EVENT: AtomicUsize = AtomicUsize::new(0);
+// Auto-reset heartbeat event signalled by the live UI process. The tray
+// process uses it to detect "a UI window is currently up" so that exactly one
+// process translates controller input into keystrokes.
+static UI_ACTIVE_EVENT: AtomicUsize = AtomicUsize::new(0);
+
+// Current profile name + press counter owned by the tray process, so the tray
+// menu can persist the counter on exit.
+static TRAY_COUNTER: Mutex<Option<(String, Arc<AtomicU64>)>> = Mutex::new(None);
 
 // --- MASTER CONTROLLER LAYOUT ---
 // This guarantees a logical display order and ensures no buttons are ever missing.
@@ -154,8 +171,8 @@ fn parse_key_string(k: &str) -> Option<u16> {
                 } else {
                     None
                 }
-            } else if k.starts_with('f') {
-                if let Ok(num) = k[1..].parse::<u16>() {
+            } else if let Some(num) = k.strip_prefix('f') {
+                if let Ok(num) = num.parse::<u16>() {
                     if (1..=24).contains(&num) {
                         return Some(0x6F + num);
                     }
@@ -219,6 +236,23 @@ fn simulate_key(vk: u16, key_up: bool) {
             input.Anonymous.ki.dwFlags |= KEYEVENTF_KEYUP;
         }
         SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Send key-up events for every key an input maps to, in reverse order (mirrors
+/// the key-down ordering used on press). Used both on normal release and when
+/// the app is paused while a button is still held.
+fn release_mapped_keys(keys_vec: Option<&Vec<String>>) {
+    let Some(keys_vec) = keys_vec else { return };
+    for key_str in keys_vec.iter().rev() {
+        if key_str.is_empty() {
+            continue;
+        }
+        for part in key_str.split('+').rev() {
+            if let Some(vk) = parse_key_string(part) {
+                simulate_key(vk, true);
+            }
+        }
     }
 }
 
@@ -470,7 +504,7 @@ fn win11_colors(is_dark: bool) -> Win11Colors {
 fn win11_card_frame(colors: &Win11Colors) -> egui::Frame {
     egui::Frame::none()
         .fill(colors.surface)
-        .stroke(egui::Stroke::new(1.0, colors.border))
+        .stroke(egui::Stroke::new(1.0_f32, colors.border))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::same(14.0))
 }
@@ -499,6 +533,10 @@ fn profiles_dir() -> std::path::PathBuf {
 struct AppConfig {
     #[serde(default = "default_start_minimized")]
     start_minimized: bool,
+    /// When true the app behaves as if closed: no key simulation at all, raw
+    /// controller input is left untouched for other programs.
+    #[serde(default)]
+    paused: bool,
 }
 
 fn default_start_minimized() -> bool {
@@ -509,17 +547,35 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             start_minimized: default_start_minimized(),
+            paused: false,
         }
     }
 }
 
+/// Read a JSON file, tolerating a UTF-8 BOM.
+///
+/// Windows editors happily save JSON as UTF-8 *with* BOM. serde_json rejects
+/// the BOM, which used to make such a profile look "empty" and get silently
+/// overwritten with defaults - i.e. user mappings were destroyed on startup.
+fn read_json_file(path: &std::path::Path) -> Option<String> {
+    let data = std::fs::read_to_string(path).ok()?;
+    Some(data.strip_prefix('\u{feff}').unwrap_or(&data).to_string())
+}
+
 fn load_config() -> AppConfig {
     let path = profiles_dir().join("config.json");
-    if let Ok(data) = std::fs::read_to_string(&path) {
+    if let Some(data) = read_json_file(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
         AppConfig::default()
     }
+}
+
+/// Read-modify-write so unrelated settings (e.g. `paused`) are never dropped.
+fn update_config(f: impl FnOnce(&mut AppConfig)) {
+    let mut config = load_config();
+    f(&mut config);
+    save_config(&config);
 }
 
 fn save_config(config: &AppConfig) {
@@ -537,7 +593,6 @@ struct AppState {
     close_to_tray: bool,
     start_minimized: bool,
     run_at_startup: bool,
-    is_paused: bool,
     connected_device: Arc<Mutex<bool>>,
     pressed_inputs: Arc<Mutex<HashMap<String, bool>>>,
     active_mapping: Arc<Mutex<HashMap<String, Vec<String>>>>,
@@ -586,6 +641,309 @@ impl AppState {
     }
 }
 
+// --- 2b. CROSS-PROCESS STATE (tray process <-> UI process) ---
+//
+// The app runs as two cooperating processes:
+//   * tray process -- owns the (single) shell tray icon, runs the XInput
+//                     engine whenever no UI window is up.
+//   * UI process    -- owns the egui window, runs the XInput engine while the
+//                     window is open, never registers a tray icon.
+// Exactly one of them may translate controller input into keystrokes, and they
+// exchange state through named kernel objects (mutex + auto-reset events) and
+// through the on-disk config/profile files that already live next to the exe.
+
+#[derive(Clone, Copy, PartialEq)]
+enum ProcessRole {
+    Ui,
+    Tray,
+}
+
+fn file_stamp(path: &std::path::Path) -> Option<(u64, u64)> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((since_epoch.as_secs(), since_epoch.subsec_nanos() as u64))
+}
+
+fn mutex_is_alive(name: *const u16) -> bool {
+    unsafe {
+        let handle =
+            windows_sys::Win32::System::Threading::OpenMutexW(0x00100000, 0i32, name);
+        if handle.is_null() {
+            false
+        } else {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+            true
+        }
+    }
+}
+
+fn is_tray_process_alive() -> bool {
+    mutex_is_alive(windows_sys::w!("JoyMapperProTrayMutex"))
+}
+
+fn is_ui_process_alive() -> bool {
+    mutex_is_alive(windows_sys::w!("JoyMapperProUIMutex"))
+}
+
+fn create_show_ui_event() {
+    unsafe {
+        let handle = windows_sys::Win32::System::Threading::CreateEventW(
+            std::ptr::null_mut(),
+            0,
+            0,
+            windows_sys::w!("JoyMapperProShowUIEvent"),
+        );
+        if !handle.is_null() {
+            SHOW_UI_EVENT.store(handle as usize, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Ask the running UI process to show/restore its window. A no-op when no UI
+/// process exists yet -- the caller spawns one in that case.
+fn signal_show_ui() {
+    if SHOW_UI_EVENT.load(Ordering::SeqCst) == 0 {
+        create_show_ui_event();
+    }
+    let handle = SHOW_UI_EVENT.load(Ordering::SeqCst);
+    if handle != 0 {
+        unsafe {
+            windows_sys::Win32::System::Threading::SetEvent(handle as *mut std::ffi::c_void);
+        }
+    }
+}
+
+fn consume_show_ui_request() -> bool {
+    let handle = SHOW_UI_EVENT.load(Ordering::SeqCst);
+    if handle == 0 {
+        return false;
+    }
+    unsafe {
+        windows_sys::Win32::System::Threading::WaitForSingleObject(
+            handle as *mut std::ffi::c_void,
+            0,
+        ) == windows_sys::Win32::Foundation::WAIT_OBJECT_0
+    }
+}
+
+/// Keep signalling the named event for as long as this UI process lives.
+fn spawn_ui_heartbeat() {
+    unsafe {
+        let handle = windows_sys::Win32::System::Threading::CreateEventW(
+            std::ptr::null_mut(),
+            0,
+            0,
+            windows_sys::w!("JoyMapperProUIActive"),
+        );
+        if handle.is_null() {
+            return;
+        }
+        UI_ACTIVE_EVENT.store(handle as usize, Ordering::SeqCst);
+    }
+    std::thread::spawn(|| loop {
+        let handle = UI_ACTIVE_EVENT.load(Ordering::SeqCst);
+        if handle != 0 {
+            unsafe {
+                windows_sys::Win32::System::Threading::SetEvent(handle as *mut std::ffi::c_void);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    });
+}
+
+/// True while a UI window is up, i.e. the UI process owns key simulation.
+///
+/// The UI single-instance mutex is the authoritative signal: it exists exactly
+/// as long as the UI process does. An auto-reset heartbeat event is only used as
+/// a fallback, and never on its own - polling an auto-reset event consumes the
+/// signal, so it reads "inactive" between the sender's ticks.
+fn ui_process_active() -> bool {
+    if is_ui_process_alive() {
+        return true;
+    }
+    let mut handle = UI_ACTIVE_EVENT.load(Ordering::SeqCst);
+    if handle == 0 {
+        unsafe {
+            let handle = windows_sys::Win32::System::Threading::OpenEventW(
+                0x00100000,
+                0,
+                windows_sys::w!("JoyMapperProUIActive"),
+            );
+            if !handle.is_null() {
+                UI_ACTIVE_EVENT.store(handle as usize, Ordering::SeqCst);
+            }
+        }
+        handle = UI_ACTIVE_EVENT.load(Ordering::SeqCst);
+    }
+    if handle == 0 {
+        return false;
+    }
+    unsafe {
+        windows_sys::Win32::System::Threading::WaitForSingleObject(
+            handle as *mut std::ffi::c_void,
+            0,
+        ) == windows_sys::Win32::Foundation::WAIT_OBJECT_0
+    }
+}
+
+fn set_paused(paused: bool) {
+    PAUSED.store(paused, Ordering::SeqCst);
+    update_config(|cfg| cfg.paused = paused);
+}
+
+fn toggle_paused() -> bool {
+    let paused = !PAUSED.load(Ordering::SeqCst);
+    set_paused(paused);
+    paused
+}
+
+/// Mirror config.json changes (pause toggled by the other process) into PAUSED.
+fn spawn_config_watcher(ctx: Option<egui::Context>) {
+    PAUSED.store(load_config().paused, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let path = profiles_dir().join("config.json");
+        let mut last = file_stamp(&path);
+        loop {
+            std::thread::sleep(Duration::from_millis(300));
+            let current = file_stamp(&path);
+            if current != last {
+                last = current;
+                let paused = load_config().paused;
+                if PAUSED.swap(paused, Ordering::SeqCst) != paused {
+                    if let Some(ref ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Read-only variant of load_profiles(): never writes to disk, so the tray
+/// process can refresh its mapping snapshot without racing the UI process.
+fn load_active_profile_mapping() -> (String, HashMap<String, Vec<String>>) {
+    let dir = profiles_dir();
+    let mut profiles: HashMap<String, Profile> = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(data) = read_json_file(&path) {
+                let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                if name == "config" {
+                    continue;
+                }
+                let parsed = serde_json::from_str::<Profile>(&data)
+                    .or_else(|_| serde_json::from_str::<OldProfile>(&data).map(Profile::from));
+                if let Ok(profile) = parsed {
+                    profiles.insert(name, profile);
+                }
+            }
+        }
+    }
+
+    if profiles.is_empty() {
+        return ("Default".to_string(), HashMap::new());
+    }
+
+    let name = profiles
+        .iter()
+        .find(|(_, p)| p.last_used)
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| {
+            if profiles.contains_key("Default") {
+                "Default".to_string()
+            } else {
+                profiles.keys().next().unwrap().clone()
+            }
+        });
+
+    let mut mappings = profiles.get(&name).unwrap().mappings.clone();
+    for input in ALL_INPUTS {
+        mappings
+            .entry(input.to_string())
+            .or_insert_with(default_mapping_vec);
+    }
+    (name, mappings)
+}
+
+fn profiles_stamp() -> Vec<(String, (u64, u64))> {
+    let mut stamps: Vec<(String, (u64, u64))> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(profiles_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let (Some(name), Some(stamp)) = (
+                path.file_stem().map(|s| s.to_string_lossy().to_string()),
+                file_stamp(&path),
+            ) {
+                stamps.push((name, stamp));
+            }
+        }
+    }
+    stamps.sort();
+    stamps
+}
+
+/// The tray process replays the profile edited by the UI process, so mappings
+/// stay correct after the UI hands the input engine back on exit.
+fn spawn_profile_watcher(
+    active_mapping: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    current_name: Arc<Mutex<String>>,
+) {
+    std::thread::spawn(move || {
+        let mut last = profiles_stamp();
+        loop {
+            std::thread::sleep(Duration::from_millis(1000));
+            let current = profiles_stamp();
+            if current != last {
+                last = current;
+                let (name, mappings) = load_active_profile_mapping();
+                *current_name.lock().unwrap() = name;
+                *active_mapping.lock().unwrap() = mappings;
+            }
+        }
+    });
+}
+
+/// Persist only the press counter into the profile on disk, never the whole
+/// in-memory mapping (that would clobber edits made by the UI process).
+fn persist_key_press_count(name: &str, count: u64) {
+    let path = profiles_dir().join(format!("{}.json", name));
+    if let Some(data) = read_json_file(&path) {
+        if let Ok(mut profile) = serde_json::from_str::<Profile>(&data) {
+            if profile.total_key_presses == count {
+                return;
+            }
+            profile.total_key_presses = count;
+            if let Ok(json) = serde_json::to_string_pretty(&profile) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
+    }
+}
+
+fn spawn_tray_counter_persister() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(30));
+        // Only write while we are the process doing the simulating, so we never
+        // race the UI process for the same file.
+        if !ui_process_active() {
+            persist_tray_counter();
+        }
+    });
+}
+
+fn persist_tray_counter() {
+    if let Some((name, counter)) = TRAY_COUNTER.lock().unwrap().as_ref() {
+        persist_key_press_count(name, counter.load(Ordering::Relaxed));
+    }
+}
+
 // --- 3. PURE WIN32 TRAY ICON SETUP ---
 unsafe extern "system" fn tray_wnd_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
@@ -599,19 +957,23 @@ unsafe extern "system" fn tray_wnd_proc(
     if msg == WM_USER + 1 {
         let event = lparam as u32 & 0xFFFF;
         match event {
-            WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-                let main_hwnd = MAIN_HWND.load(Ordering::SeqCst) as *mut std::ffi::c_void;
-                if !main_hwnd.is_null() {
-                    ShowWindow(main_hwnd, SW_RESTORE);
-                    SetForegroundWindow(main_hwnd);
-                    WAKE_UP_UI.store(true, Ordering::SeqCst);
-                } else if let Ok(exe) = std::env::current_exe() {
-                    let _ = std::process::Command::new(exe).arg("--ui").spawn();
-                }
+            WM_LBUTTONUP | WM_LBUTTONDBLCLK | 101 => {
+                // Left click, double click and "Show Mapper" all do the same
+                // thing. The spawned instance either becomes the UI process or,
+                // when one is already running, forwards a show request to it --
+                // so clicking the tray icon can never create a second icon.
+                show_mapper_window();
             }
             WM_RBUTTONUP => {
                 let hmenu = CreatePopupMenu();
                 AppendMenuW(hmenu, MF_STRING, 101, windows_sys::w!("Show Mapper"));
+                let pause_label: Vec<u16> = if PAUSED.load(Ordering::SeqCst) {
+                    "Resume mapping".encode_utf16().chain(std::iter::once(0)).collect()
+                } else {
+                    "Pause mapping".encode_utf16().chain(std::iter::once(0)).collect()
+                };
+                AppendMenuW(hmenu, MF_STRING, 103, pause_label.as_ptr());
+                AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
                 AppendMenuW(hmenu, MF_STRING, 102, windows_sys::w!("Exit Program"));
                 let mut pt: POINT = std::mem::zeroed();
                 GetCursorPos(&mut pt);
@@ -670,17 +1032,16 @@ unsafe extern "system" fn tray_wnd_proc(
     }
 
     if msg == WM_COMMAND {
-        if wparam == 101 {
-            let main_hwnd = MAIN_HWND.load(Ordering::SeqCst) as *mut std::ffi::c_void;
-            if !main_hwnd.is_null() {
-                ShowWindow(main_hwnd, SW_RESTORE);
-                SetForegroundWindow(main_hwnd);
-                WAKE_UP_UI.store(true, Ordering::SeqCst);
-            } else if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe).arg("--ui").spawn();
+        match wparam {
+            101 => show_mapper_window(),
+            103 => {
+                toggle_paused();
             }
-        } else if wparam == 102 {
-            std::process::exit(0);
+            102 => {
+                persist_tray_counter();
+                std::process::exit(0);
+            }
+            _ => {}
         }
         return 0;
     }
@@ -688,21 +1049,29 @@ unsafe extern "system" fn tray_wnd_proc(
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-fn init_tray_icon() -> isize {
+/// Bring the mapper window up: ask a running UI process to restore itself, and
+/// spawn one when it is not running. The tray icon stays owned by this process.
+fn show_mapper_window() {
+    signal_show_ui();
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--ui").spawn();
+    }
+}
+
+/// Primary icon embedded in the executable. Used for the window icon in the UI
+/// process; it does NOT register anything with the shell.
+fn load_app_icon() -> isize {
     unsafe {
-        use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
-        use windows_sys::Win32::UI::Shell::*;
+        use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+        use windows_sys::Win32::UI::Shell::ExtractIconExW;
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-        // 1. Get the path to the current running executable
         let mut exe_path = [0u16; 260];
         GetModuleFileNameW(std::ptr::null_mut(), exe_path.as_mut_ptr(), 260);
 
-        // 2. Extract the primary icon (index 0) embedded in this .exe
         let mut hicon: HICON = std::ptr::null_mut();
         ExtractIconExW(exe_path.as_ptr(), 0, std::ptr::null_mut(), &mut hicon, 1);
 
-        // Fallback to a system icon just in case the .exe has no embedded icon yet
         if hicon.is_null() {
             ExtractIconExW(
                 windows_sys::w!("shell32.dll"),
@@ -712,8 +1081,20 @@ fn init_tray_icon() -> isize {
                 1,
             );
         }
+        hicon as isize
+    }
+}
 
-        let hicon_raw = hicon as isize;
+/// Register the (single) shell tray icon. Only ever called by the tray process.
+fn init_tray_icon() -> isize {
+    unsafe {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::Shell::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+        TRAY_OWNER.store(true, Ordering::SeqCst);
+
+        let hicon_raw = load_app_icon();
         TRAY_APP_ICON.store(hicon_raw as usize, Ordering::SeqCst);
 
         // Load tray-state icons embedded directly in the binary
@@ -806,12 +1187,17 @@ struct SoundEngine {
 }
 
 impl SoundEngine {
-    fn new() -> Self {
-        let (stream, stream_handle) = OutputStream::try_default().unwrap();
+    /// Returns None when no output device is available (headless / RDP / no
+    /// audio endpoint) instead of panicking and taking the app down with it.
+    fn new() -> Option<Self> {
+        let (stream, stream_handle) = OutputStream::try_default().ok()?;
         let (tx, rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
-            let sink = Sink::try_new(&stream_handle).unwrap();
+            let sink = match Sink::try_new(&stream_handle) {
+                Ok(sink) => sink,
+                Err(_) => return,
+            };
             sink.set_volume(0.1);
             while let Ok(()) = rx.recv() {
                 use rodio::Source;
@@ -822,10 +1208,10 @@ impl SoundEngine {
             }
         });
 
-        Self {
+        Some(Self {
             _stream: stream,
             sender: tx,
-        }
+        })
     }
 
     fn sender(&self) -> std::sync::mpsc::Sender<()> {
@@ -836,8 +1222,8 @@ impl SoundEngine {
 // --- 4. MAIN APPLICATION LOGIC ---
 struct JoyMapperApp {
     state: AppState,
-    tray_hicon: isize,
-    sound_engine: SoundEngine,
+    window_icon: isize,
+    sound_engine: Option<SoundEngine>,
     window_visible: bool,
 }
 
@@ -849,7 +1235,9 @@ impl Drop for JoyMapperApp {
 
 impl JoyMapperApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let tray_hicon = init_tray_icon();
+        // Window icon only. The tray icon belongs to the tray process, which is
+        // why opening this window never adds a second tray icon.
+        let window_icon = load_app_icon();
 
         let (profiles, current_profile_name) = load_profiles();
 
@@ -871,9 +1259,13 @@ impl JoyMapperApp {
         ));
         let sound_enabled = Arc::new(AtomicBool::new(true));
         let sound_engine = SoundEngine::new();
-        let click_tx = sound_engine.sender();
+        let click_tx = sound_engine.as_ref().map(|engine| engine.sender());
+
+        // Keep exactly one tray icon alive next to the window.
+        ensure_tray_process();
 
         start_hardware_threads(
+            ProcessRole::Ui,
             Some(cc.egui_ctx.clone()),
             connected_device.clone(),
             pressed_inputs.clone(),
@@ -884,6 +1276,7 @@ impl JoyMapperApp {
             click_tx,
             sound_enabled.clone(),
         );
+        spawn_config_watcher(Some(cc.egui_ctx.clone()));
 
         let config = load_config();
 
@@ -896,7 +1289,6 @@ impl JoyMapperApp {
                 close_to_tray: true,
                 start_minimized: if std::env::args().any(|a| a == "--ui") { false } else { config.start_minimized },
                 run_at_startup: false,
-                is_paused: false,
                 connected_device,
                 pressed_inputs,
                 active_mapping,
@@ -911,7 +1303,7 @@ impl JoyMapperApp {
                 connection_start,
                 battery_info,
             },
-            tray_hicon,
+            window_icon,
             sound_engine,
             window_visible: if std::env::args().any(|a| a == "--ui") { true } else { !config.start_minimized },
         };
@@ -985,8 +1377,8 @@ impl JoyMapperApp {
         style.visuals.panel_fill = Color32::TRANSPARENT;
 
         // Subtle border to distinguish panels
-        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, colors.border);
-        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, colors.border);
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, colors.border);
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, colors.border);
 
         // Elevated shadow for menus / popups
         style.visuals.window_shadow = egui::epaint::Shadow {
@@ -1006,16 +1398,10 @@ impl eframe::App for JoyMapperApp {
         // Keep the sound engine's OutputStream alive for the dedicated audio thread.
         let _binding = &self.sound_engine;
         // --- 1. WINDOW SYSTEM LOGIC ---
-        if MAIN_HWND.load(Ordering::SeqCst) == 0 {
-            if let Ok(handle) = frame.window_handle() {
-                if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
-                    MAIN_HWND.store(win32.hwnd.get() as usize, Ordering::SeqCst);
-                }
-            }
-        }
-
-        if WAKE_UP_UI.swap(false, Ordering::SeqCst) {
+        // The tray process asks us to come back (tray click / "Show Mapper").
+        if consume_show_ui_request() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             self.window_visible = true;
             UI_VISIBLE.store(true, Ordering::Relaxed);
@@ -1030,13 +1416,13 @@ impl eframe::App for JoyMapperApp {
             }
 
             if let Ok(handle) = frame.window_handle() {
-                let _ = window_vibrancy::apply_mica(&handle, Some(is_windows_dark_mode()));
+                let _ = window_vibrancy::apply_mica(handle, Some(is_windows_dark_mode()));
 
                 if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
                     unsafe {
                         use windows_sys::Win32::UI::WindowsAndMessaging::*;
-                        SendMessageW(win32.hwnd.get() as _, WM_SETICON, 1, self.tray_hicon);
-                        SendMessageW(win32.hwnd.get() as _, WM_SETICON, 0, self.tray_hicon);
+                        SendMessageW(win32.hwnd.get() as _, WM_SETICON, 1, self.window_icon);
+                        SendMessageW(win32.hwnd.get() as _, WM_SETICON, 0, self.window_icon);
                     }
                 }
             }
@@ -1044,27 +1430,14 @@ impl eframe::App for JoyMapperApp {
         }
 
         // --- WINDOW CLOSE BEHAVIOR ---
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.state.close_to_tray {
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.state.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.state.save_to_disk();
 
-                // If a tray process is already alive, just exit — don't spawn another
-                let tray_running = unsafe {
-                    let handle = windows_sys::Win32::System::Threading::OpenMutexW(
-                        0x00100000,
-                        0i32,
-                        windows_sys::w!("JoyMapperProTrayMutex"),
-                    );
-                    if !handle.is_null() {
-                        windows_sys::Win32::Foundation::CloseHandle(handle);
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                if !tray_running {
+                // The tray process keeps the single tray icon alive; only spawn
+                // one when it is not running yet.
+                if !is_tray_process_alive() {
                     if let Ok(exe) = std::env::current_exe() {
                         let _ = std::process::Command::new(exe)
                             .arg("--tray")
@@ -1073,7 +1446,6 @@ impl eframe::App for JoyMapperApp {
                 }
                 std::process::exit(0);
             }
-        }
 
         // --- EARLY RETURN WHEN HIDDEN TO TRAY ---
         if !self.window_visible && self.state.rename_target.is_none() {
@@ -1205,14 +1577,14 @@ impl eframe::App for JoyMapperApp {
         // --- 3. UI RENDERING ---
         let colors = win11_colors(is_dark);
         let connected = *self.state.connected_device.lock().unwrap();
-        let status_text = if self.state.is_paused {
+        let status_text = if PAUSED.load(Ordering::SeqCst) {
             "Paused"
         } else if connected {
             "Controller connected"
         } else {
             "No controller"
         };
-        let status_color = if self.state.is_paused {
+        let status_color = if PAUSED.load(Ordering::SeqCst) {
             colors.warning
         } else if connected {
             colors.success
@@ -1245,7 +1617,7 @@ impl eframe::App for JoyMapperApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         egui::Frame::none()
                             .fill(colors.surface_alt)
-                            .stroke(egui::Stroke::new(1.0, colors.border))
+                            .stroke(egui::Stroke::new(1.0_f32, colors.border))
                             .rounding(egui::Rounding::same(4.0))
                             .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                             .show(ui, |ui| {
@@ -1304,7 +1676,7 @@ impl eframe::App for JoyMapperApp {
 
                                 if ui.button("Import").clicked() {
                                     if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                                        if let Ok(content) = std::fs::read_to_string(&path) {
+                                        if let Some(content) = read_json_file(&path) {
                                             let profile = serde_json::from_str::<Profile>(&content)
                                                 .or_else(|_| serde_json::from_str::<OldProfile>(&content).map(Profile::from));
                                             if let Ok(profile) = profile {
@@ -1353,12 +1725,19 @@ impl eframe::App for JoyMapperApp {
                                 }
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let label = if self.state.is_paused { "Resume" } else { "Pause" };
+                                    let paused = PAUSED.load(Ordering::SeqCst);
+                                    let label = if paused { "Resume" } else { "Pause" };
                                     if ui
-                                        .add(egui::Button::new(label).fill(if self.state.is_paused { colors.accent } else { colors.surface_alt }))
+                                        .add(egui::Button::new(label).fill(if paused { colors.accent } else { colors.surface_alt }))
+                                        .on_hover_text(if paused {
+                                            "Resume mapping - controller input is mapped to keys again"
+                                        } else {
+                                            "Pause mapping - controller input passes through untouched"
+                                        })
                                         .clicked()
                                     {
-                                        self.state.is_paused = !self.state.is_paused;
+                                        toggle_paused();
+                                        ctx.request_repaint();
                                     }
                                 });
                             });
@@ -1372,7 +1751,7 @@ impl eframe::App for JoyMapperApp {
                                 } else {
                                     Color32::from_rgba_unmultiplied(255, 244, 206, 240)
                                 })
-                                .stroke(egui::Stroke::new(1.0, colors.warning))
+                                .stroke(egui::Stroke::new(1.0_f32, colors.warning))
                                 .rounding(egui::Rounding::same(8.0))
                                 .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                                 .show(ui, |ui| {
@@ -1458,11 +1837,11 @@ impl eframe::App for JoyMapperApp {
                                                                 colors.text
                                                             };
                                                             let chip_stroke = if is_recording {
-                                                                egui::Stroke::new(1.5, colors.warning)
+                                                                egui::Stroke::new(1.5_f32, colors.warning)
                                                             } else if current_val.is_empty() {
-                                                                egui::Stroke::new(1.0, colors.border)
+                                                                egui::Stroke::new(1.0_f32, colors.border)
                                                             } else {
-                                                                egui::Stroke::new(1.0, colors.accent)
+                                                                egui::Stroke::new(1.0_f32, colors.accent)
                                                             };
 
                                                             let cell_btn = ui.add(
@@ -1611,8 +1990,8 @@ impl eframe::App for JoyMapperApp {
                                                             });
                                                         }
 
-                                                        if slots_count < 10 {
-                                                            if ui
+                                                        if slots_count < 10
+                                                            && ui
                                                                 .add(egui::Button::new("+").fill(colors.surface_alt).min_size(egui::vec2(30.0, 28.0)))
                                                                 .on_hover_text("Add simultaneous key slot")
                                                                 .clicked()
@@ -1620,7 +1999,6 @@ impl eframe::App for JoyMapperApp {
                                                                 key_slots.push("".to_string());
                                                                 needs_save = true;
                                                             }
-                                                        }
                                                     });
 
                                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1659,8 +2037,23 @@ impl eframe::App for JoyMapperApp {
                             ui.add_space(8.0);
                             ui.checkbox(&mut self.state.close_to_tray, "Close button minimizes to system tray");
                             if ui.checkbox(&mut self.state.start_minimized, "Start minimized to system tray").changed() {
-                                save_config(&AppConfig { start_minimized: self.state.start_minimized });
+                                update_config(|cfg| cfg.start_minimized = self.state.start_minimized);
                             }
+
+                            let mut paused = PAUSED.load(Ordering::SeqCst);
+                            if ui
+                                .checkbox(&mut paused, "Pause mapping (controller input passes through untouched)")
+                                .changed()
+                            {
+                                set_paused(paused);
+                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "While paused the app stops simulating keys completely. Pausing does not close it.",
+                                )
+                                .color(colors.muted),
+                            );
+                            ui.add_space(6.0);
                             if ui.checkbox(&mut self.state.run_at_startup, "Start with Windows").changed() {
                                 self.toggle_startup(self.state.run_at_startup);
                             }
@@ -1774,7 +2167,7 @@ impl eframe::App for JoyMapperApp {
                         if !new_name.is_empty() && !self.state.profiles.contains_key(&new_name) {
                             let dir = profiles_dir();
                             let old_path = dir.join(format!("{}.json", target));
-                            let new_path = dir.join(format!("{}.json", &new_name));
+                            let new_path = dir.join(format!("{}.json", new_name));
                             let _ = std::fs::rename(&old_path, &new_path);
                             let mappings = self.state.profiles.remove(target).unwrap().mappings;
                             self.state.profiles.insert(
@@ -1801,8 +2194,8 @@ impl eframe::App for JoyMapperApp {
                             {
                                 let old_name = self.state.rename_target.take().unwrap();
                                 let dir = profiles_dir();
-                                let old_path = dir.join(format!("{}.json", &old_name));
-                                let new_path = dir.join(format!("{}.json", &new_name));
+                                let old_path = dir.join(format!("{}.json", old_name));
+                                let new_path = dir.join(format!("{}.json", new_name));
                                 let _ = std::fs::rename(&old_path, &new_path);
                                 let mappings =
                                     self.state.profiles.remove(&old_name).unwrap().mappings;
@@ -1827,6 +2220,7 @@ impl eframe::App for JoyMapperApp {
 }
 
 fn start_hardware_threads(
+    role: ProcessRole,
     ctx: Option<egui::Context>,
     connected_device: Arc<Mutex<bool>>,
     pressed_inputs: Arc<Mutex<HashMap<String, bool>>>,
@@ -1834,7 +2228,7 @@ fn start_hardware_threads(
     key_press_counter: Arc<AtomicU64>,
     connection_start: Arc<Mutex<std::time::Instant>>,
     battery_info: Arc<Mutex<(u8, u8)>>,
-    click_tx: std::sync::mpsc::Sender<()>,
+    click_tx: Option<std::sync::mpsc::Sender<()>>,
     sound_enabled: Arc<AtomicBool>,
 ) {
     let ctx_poll = ctx.clone();
@@ -1854,6 +2248,7 @@ fn start_hardware_threads(
         let mut last_connected_time = std::time::Instant::now();
         let mut last_tray_update = std::time::Instant::now();
         let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
+        let mut was_paused = false;
         loop {
             let (connected, buttons, lx, ly, rx, ry, lt, rt) = check_controller_full(0);
 
@@ -1920,38 +2315,79 @@ fn start_hardware_threads(
                 let mut lock = pressed_inputs.lock().unwrap();
                 let macro_map = active_mapping.lock().unwrap();
 
+                // Pause = behave exactly as if the app was closed: no key
+                // simulation, no sound, no press counting. Raw controller input
+                // is untouched, other programs keep seeing it normally.
+                let paused = PAUSED.load(Ordering::SeqCst);
+                let owns_input = match role {
+                    ProcessRole::Ui => true,
+                    ProcessRole::Tray => !ui_process_active(),
+                };
+                let simulate = owns_input && !paused;
+
                 let mut state_changed = false;
+
+                if !simulate && paused {
+                    // Release anything we are currently holding down so no key
+                    // stays stuck, then forget the pressed state.
+                    let held: Vec<String> = lock
+                        .iter()
+                        .filter(|(_, pressed)| **pressed)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    if !held.is_empty() {
+                        for name in &held {
+                            release_mapped_keys(macro_map.get(name));
+                        }
+                    }
+                    let was_paused_now = was_paused;
+                    for pressed in lock.values_mut() {
+                        *pressed = false;
+                    }
+                    drop(lock);
+                    drop(macro_map);
+                    if !was_paused_now {
+                        was_paused = true;
+                        if let Some(ref ctx) = ctx_poll {
+                            ctx.request_repaint();
+                        }
+                    }
+                    std::thread::sleep(poll_interval);
+                    continue;
+                }
+                if !paused && was_paused {
+                    was_paused = false;
+                    if let Some(ref ctx) = ctx_poll {
+                        ctx.request_repaint();
+                    }
+                }
 
                 for (name, is_pressed) in &current_pressed {
                     let was_pressed = *lock.get(name).unwrap_or(&false);
                     if *is_pressed && !was_pressed {
-                        if let Some(keys_vec) = macro_map.get(name) {
-                            for key_str in keys_vec {
-                                if !key_str.is_empty() {
-                                    for part in key_str.split('+') {
-                                        if let Some(vk) = parse_key_string(part) {
-                                            simulate_key(vk, false);
-                                            key_press_counter.fetch_add(1, Ordering::Relaxed);
+                        if simulate {
+                            if let Some(keys_vec) = macro_map.get(name) {
+                                for key_str in keys_vec {
+                                    if !key_str.is_empty() {
+                                        for part in key_str.split('+') {
+                                            if let Some(vk) = parse_key_string(part) {
+                                                simulate_key(vk, false);
+                                                key_press_counter.fetch_add(1, Ordering::Relaxed);
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        if sound_enabled.load(Ordering::SeqCst) {
-                            let _ = click_tx.send(());
+                            if sound_enabled.load(Ordering::SeqCst) {
+                                if let Some(ref tx) = click_tx {
+                                    let _ = tx.send(());
+                                }
+                            }
                         }
                         state_changed = true;
                     } else if !*is_pressed && was_pressed {
-                        if let Some(keys_vec) = macro_map.get(name) {
-                            for key_str in keys_vec.iter().rev() {
-                                if !key_str.is_empty() {
-                                    for part in key_str.split('+').rev() {
-                                        if let Some(vk) = parse_key_string(part) {
-                                            simulate_key(vk, true);
-                                        }
-                                    }
-                                }
-                            }
+                        if simulate {
+                            release_mapped_keys(macro_map.get(name));
                         }
                         state_changed = true;
                     }
@@ -2011,7 +2447,11 @@ fn load_profiles() -> (HashMap<String, Profile>, String) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(data) = std::fs::read_to_string(&path) {
+                // config.json lives here too but is not a profile.
+                if path.file_stem().and_then(|s| s.to_str()) == Some("config") {
+                    continue;
+                }
+                if let Some(data) = read_json_file(&path) {
                     if let Ok(profile) = serde_json::from_str::<Profile>(&data) {
                         let name = path.file_stem().unwrap().to_string_lossy().to_string();
                         profiles.insert(name, profile);
@@ -2061,7 +2501,7 @@ fn load_profiles() -> (HashMap<String, Profile>, String) {
                 if let Some(p) = profiles.get_mut(&name) {
                     p.last_used = false;
                     if let Ok(json) = serde_json::to_string_pretty(p) {
-                        let _ = std::fs::write(dir.join(format!("{}.json", &name)), json);
+                        let _ = std::fs::write(dir.join(format!("{}.json", name)), json);
                     }
                 }
             }
@@ -2085,13 +2525,20 @@ fn load_profiles() -> (HashMap<String, Profile>, String) {
 }
 
 fn run_tray_mode() {
-    // Signal: a tray process is alive (UI checks this before spawning another)
+    // Single tray instance: the tray icon is a per-session shell resource, so a
+    // second tray process would show a duplicate icon and duplicate keystrokes.
     unsafe {
-        windows_sys::Win32::System::Threading::CreateMutexW(
+        let mutex = windows_sys::Win32::System::Threading::CreateMutexW(
             std::ptr::null_mut(),
             0,
             windows_sys::w!("JoyMapperProTrayMutex"),
         );
+        if mutex.is_null()
+            || windows_sys::Win32::Foundation::GetLastError()
+                == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
+        {
+            return;
+        }
     }
     init_tray_icon();
 
@@ -2114,11 +2561,21 @@ fn run_tray_mode() {
     ));
     let sound_enabled = Arc::new(AtomicBool::new(true));
     let click_tx = {
-        let sound_engine = SoundEngine::new();
-        sound_engine.sender()
+        // Kept alive for as long as the tray process runs.
+        let _sound_engine = SoundEngine::new();
+        _sound_engine.as_ref().map(|engine| engine.sender())
     };
 
+    // The tray menu persists the press counter when the app is closed from it.
+    *TRAY_COUNTER.lock().unwrap() = Some((current_profile_name.clone(), key_press_counter.clone()));
+    spawn_tray_counter_persister();
+    // Pick up profiles / pause state edited by a UI process that has since exited.
+    let watched_profile_name = Arc::new(Mutex::new(current_profile_name.clone()));
+    spawn_profile_watcher(active_mapping.clone(), watched_profile_name.clone());
+    spawn_config_watcher(None);
+
     start_hardware_threads(
+        ProcessRole::Tray,
         None,
         connected_device,
         pressed_inputs,
@@ -2135,20 +2592,35 @@ fn run_tray_mode() {
     }
 }
 
+/// The tray process is the single owner of the shell tray icon; make sure one is
+/// running whenever the UI window exists.
+fn ensure_tray_process() {
+    if is_tray_process_alive() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--tray").spawn();
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let is_tray = args.iter().any(|a| a == "--tray");
+    let is_ui = args.iter().any(|a| a == "--ui");
+
     // Self-elevate to admin (skipped in --tray mode: the UI process already
     // spawns --tray while elevated, so re-elevating would show a spurious UAC)
-    if !std::env::args().any(|a| a == "--tray") && !admin::is_admin() {
+    if !is_tray && !admin::is_admin() {
         admin::self_elevate();
     }
 
-    if std::env::args().any(|a| a == "--tray") {
+    if is_tray {
         run_tray_mode();
         return Ok(());
     }
 
     // Without --ui, check config: start minimized → go straight to tray
-    let start_visible = if std::env::args().any(|a| a == "--ui") {
+    let start_visible = if is_ui {
         true
     } else {
         let config = load_config();
@@ -2166,6 +2638,10 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // Restore request from the tray process must be answered even by a
+    // second instance that exits immediately.
+    create_show_ui_event();
+
     // Single-instance guard: only one UI process at a time
     unsafe {
         let mutex = windows_sys::Win32::System::Threading::CreateMutexW(
@@ -2177,9 +2653,15 @@ fn main() -> eframe::Result<()> {
             || windows_sys::Win32::Foundation::GetLastError()
                 == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS
         {
+            // A UI window already exists: ask it to come to the front instead of
+            // opening a second one (and never a second tray icon).
+            signal_show_ui();
             return Ok(());
         }
     }
+
+    // Announce liveness so the tray process knows the UI owns key simulation.
+    spawn_ui_heartbeat();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

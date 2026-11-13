@@ -22,7 +22,8 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 | 📂 **Per-Profile Files** | Each profile = one `.json` file in the exe directory. Copy, share, or edit them directly. No AppData, no registry bloat. |
 | 🔄 **Profile Management** | Switch, New, Rename, Delete, Import, Export — all self-contained in the exe folder |
 | ⭐ **Last-Used Priority** | Profiles carry a `last_used` flag; the app restores the last-active profile on startup |
-| 🖼️ **System Tray** | The default mode hides to tray on launch (`start_minimized`). Two process modes: `--tray` (pure Win32, ~2 MB RAM) and `--ui` (full egui window, spawned on demand). RAM freed entirely when window closes. Three custom tray icons (disconnected, ready, pressing). |
+| 🖼️ **System Tray** | The default mode hides to tray on launch (`start_minimized`). **Exactly one tray icon at any time** — it is owned solely by the tray process, so opening/closing the window never adds or removes an icon. Two process modes: `--tray` (pure Win32, ~2 MB RAM) and `--ui` (full egui window, spawned on demand). RAM freed entirely when window closes. Three custom tray icons (disconnected, ready, pressing). |
+| ⏸️ **Real Pause** | Pause makes the app behave exactly as if it were closed: **zero** `SendInput` calls, no sound, no key counting. Controller input is left completely untouched so other programs receive it normally. Keys held at the moment of pausing are released (nothing gets stuck). Available from the toolbar button, the Settings tab and the tray context menu, and the state is persisted in `config.json`. |
 | 🔊 **Sound Feedback** | Plays a click on button press via a dedicated audio thread — works even while window is hidden (trayed) |
 | 🎨 **Win11 Mica Backdrop** | Translucent acrylic-style background using `window-vibrancy` + DwmSetWindowAttribute |
 | 🌓 **Theme Support** | System (auto-dark/light via registry), Dark, Light |
@@ -84,10 +85,33 @@ Just unzip and run `joymapper_rust.exe` — no installer needed.
 | Flag | Behaviour |
 |---|---|
 | *(none)* | Checks `config.json` — if `start_minimized: true` (default), runs `--tray` mode; otherwise opens the UI window. |
-| `--tray` | Pure Win32 tray mode: polling thread + key simulation only. No egui, no GL — ~2 MB RAM, ~0% CPU idle. Tray icon + "Show Mapper" menu. |
-| `--ui` | Opens the full egui configuration window. Skips `start_minimized` config. Only one UI instance allowed at a time (named mutex guard). |
+| `--tray` | Pure Win32 tray mode: polling thread + key simulation only. No egui, no GL — ~2 MB RAM, ~0% CPU idle. Tray icon + context menu. |
+| `--ui` | Opens the full egui configuration window. Skips `start_minimized` config. Only one UI instance allowed at a time (named mutex guard); a second instance forwards a *show/restore* request to the running one instead of opening another window. |
 
 The app automatically switches modes: click *Show Mapper* → spawns `joymapper.exe --ui`; close the UI to tray → spawns `joymapper.exe --tray` and exits, freeing all egui/GL resources.
+
+### 🖼️ Tray Icon & Context Menu
+
+The tray icon has a **single owner**: the `--tray` process. The `--ui` process never calls `Shell_NotifyIcon(NIM_ADD)`, so opening the mapper window cannot produce a second icon. A tray process is started automatically whenever a UI window exists without one, so an icon is always present exactly once.
+
+| Tray menu item | Action |
+|---|---|
+| **Show Mapper** | Restores/focuses the running window, or spawns a new `--ui` instance |
+| **Pause mapping / Resume mapping** | Toggles the same persisted pause state as the toolbar button |
+| **Exit Program** | Saves the key-press counter and terminates the app |
+
+Left-click or double-click the icon also shows the mapper.
+
+### ⏸️ Pause vs. Close
+
+| | Pause | Close to tray |
+|---|---|---|
+| Keystrokes simulated | none | none |
+| Controller input to other programs | untouched | untouched |
+| Window / tray icon / mappings | untouched | UI process exits |
+| Reversible by | Resume button, tray menu, Settings checkbox | re-opening from the tray |
+
+Pause state survives restarts (it is stored as `paused` in `config.json`).
 
 ### 🎮 All Supported Inputs
 
@@ -160,6 +184,7 @@ Each input can hold **up to 10 simultaneous key strings** in an array:
 - The `last_used` flag tracks the most recently active profile across sessions
 - Arrays with a single string are cleanly backward-compatible with old single-string profiles (auto-migrated on load)
 - Missing inputs are automatically repaired on startup (forward-compatible with new controller buttons)
+- A UTF-8 **BOM** is tolerated when reading profiles (Notepad writes one by default). Unparsable files used to be treated as "no profile" and silently overwritten with defaults.
 
 ---
 
@@ -192,6 +217,17 @@ The app runs as **two separate process modes**, never mixing them:
 ```
 
 Key design: the egui/eframe process **does not stay alive** when the window is hidden. Closing to tray destroys the process entirely (all GL context, swapchain buffers, font atlas freed). The tray process uses pure Win32 — no egui dependencies, no GPU allocations, no window surface.
+
+### 🔁 Single Input Owner
+
+Both processes poll XInput (each needs its own state for status display, battery and row highlighting), but **only one of them may translate input into keystrokes** — otherwise a single button press would be sent twice while the window is open:
+
+| Process | Tray icon | Simulates keys |
+|---|---|---|
+| `--tray` | yes (the only one) | only while no UI window is up (detected via the `JoyMapperProUIMutex` single-instance mutex) |
+| `--ui` | never | while the window is up |
+
+The tray process also watches the profile files on disk, so mappings edited in the UI are picked up as soon as the UI hands the input engine back on exit. Pause state is shared the same way (persisted in `config.json` and mirrored into both processes), so pausing from either process takes effect everywhere.
 
 ### 🧵 Thread Model
 
