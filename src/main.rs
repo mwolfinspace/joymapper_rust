@@ -510,6 +510,16 @@ fn win11_card_frame(colors: &Win11Colors) -> egui::Frame {
         .inner_margin(egui::Margin::same(14.0))
 }
 
+fn settings_card_title(ui: &mut egui::Ui, colors: &Win11Colors, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(16.0)
+            .strong()
+            .color(colors.text),
+    );
+    ui.add_space(8.0);
+}
+
 fn input_display_name(raw: &str) -> String {
     raw.replace("DPAD_", "D-pad ")
         .replace("LS_", "Left stick ")
@@ -1479,6 +1489,239 @@ impl JoyMapperApp {
         }
     }
 
+    /// Settings are laid out as tiles: two columns on a normal window so the
+    /// page does not run off the bottom, stacked only when the window is
+    /// narrow. The scroll area is the safety net for very short windows.
+    fn settings_tab(&mut self, ui: &mut egui::Ui, colors: &Win11Colors) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if ui.available_width() >= 560.0 {
+                    ui.columns(2, |cols| {
+                        self.settings_general_card(&mut cols[0], colors);
+                        cols[0].add_space(10.0);
+                        self.settings_stats_card(&mut cols[0], colors);
+
+                        self.settings_updates_card(&mut cols[1], colors);
+                        cols[1].add_space(10.0);
+                        self.settings_hardware_card(&mut cols[1], colors);
+                    });
+                } else {
+                    self.settings_general_card(ui, colors);
+                    ui.add_space(10.0);
+                    self.settings_updates_card(ui, colors);
+                    ui.add_space(10.0);
+                    self.settings_hardware_card(ui, colors);
+                    ui.add_space(10.0);
+                    self.settings_stats_card(ui, colors);
+                }
+            });
+    }
+
+    fn settings_general_card(&mut self, ui: &mut egui::Ui, colors: &Win11Colors) {
+        win11_card_frame(colors).show(ui, |ui| {
+            settings_card_title(ui, colors, "General");
+            ui.checkbox(&mut self.state.close_to_tray, "Close button minimizes to tray");
+            if ui
+                .checkbox(&mut self.state.start_minimized, "Start minimized to tray")
+                .changed()
+            {
+                update_config(|cfg| cfg.start_minimized = self.state.start_minimized);
+            }
+
+            let mut paused = PAUSED.load(Ordering::SeqCst);
+            if ui.checkbox(&mut paused, "Pause mapping").changed() {
+                set_paused(paused);
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Stops simulating keys completely; controller input still reaches other programs. Pausing does not close the app.",
+                )
+                .color(colors.muted),
+            );
+            ui.add_space(6.0);
+            if ui
+                .checkbox(&mut self.state.run_at_startup, "Start with Windows")
+                .changed()
+            {
+                self.toggle_startup(self.state.run_at_startup);
+            }
+
+            if ui
+                .checkbox(&mut self.state.sound_enabled, "Sound on controller press")
+                .changed()
+            {
+                self.state
+                    .sound_enabled_atomic
+                    .store(self.state.sound_enabled, Ordering::SeqCst);
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label("Theme");
+                egui::ComboBox::from_id_source("theme_select")
+                    .selected_text(match self.state.theme {
+                        AppTheme::System => "Use Windows setting",
+                        AppTheme::Light => "Light",
+                        AppTheme::Dark => "Dark",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.state.theme,
+                            AppTheme::System,
+                            "Use Windows setting",
+                        );
+                        ui.selectable_value(&mut self.state.theme, AppTheme::Light, "Light");
+                        ui.selectable_value(&mut self.state.theme, AppTheme::Dark, "Dark");
+                    });
+            });
+        });
+    }
+
+    fn settings_updates_card(&mut self, ui: &mut egui::Ui, colors: &Win11Colors) {
+        win11_card_frame(colors).show(ui, |ui| {
+            settings_card_title(ui, colors, "Updates");
+            ui.label(format!("JoyMapper Pro v{}", updater::CURRENT_VERSION));
+            if ui
+                .checkbox(
+                    &mut self.state.auto_update,
+                    "Check automatically (once a day)",
+                )
+                .changed()
+            {
+                update_config(|cfg| cfg.auto_update = self.state.auto_update);
+            }
+            ui.add_space(6.0);
+
+            let status = self.state.update_state.lock().unwrap().clone();
+            let busy = matches!(
+                status,
+                updater::UpdateState::Checking | updater::UpdateState::Downloading { .. }
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Check for updates"))
+                    .clicked()
+                {
+                    spawn_update_check(ui.ctx().clone(), self.state.update_state.clone());
+                }
+                match &status {
+                    updater::UpdateState::Checking => {
+                        ui.label(egui::RichText::new("Checking...").color(colors.muted));
+                    }
+                    updater::UpdateState::UpToDate => {
+                        ui.colored_label(colors.success, "You are up to date.");
+                    }
+                    updater::UpdateState::Available(release) => {
+                        ui.colored_label(
+                            colors.accent,
+                            format!("v{} is available.", release.version),
+                        );
+                    }
+                    updater::UpdateState::Downloading { progress, .. } => {
+                        ui.label(format!("Downloading... {:.0}%", progress * 100.0));
+                    }
+                    updater::UpdateState::Ready => {
+                        ui.label("Restarting...");
+                    }
+                    updater::UpdateState::Error(e) => {
+                        ui.colored_label(colors.danger, format!("Check failed: {}", e));
+                    }
+                    updater::UpdateState::Idle => {}
+                }
+            });
+        });
+    }
+
+    fn settings_hardware_card(&mut self, ui: &mut egui::Ui, colors: &Win11Colors) {
+        let connected = *self.state.connected_device.lock().unwrap();
+        win11_card_frame(colors).show(ui, |ui| {
+            settings_card_title(ui, colors, "Hardware");
+            if connected {
+                ui.colored_label(
+                    colors.success,
+                    "Connected - controller active through XInput",
+                );
+                ui.label(
+                    egui::RichText::new("Controller 0 | polling at 1000 Hz | XInput engine")
+                        .color(colors.muted),
+                );
+                let elapsed = self.state.connection_start.lock().unwrap().elapsed();
+                let secs = elapsed.as_secs();
+                let mins = secs / 60;
+                let hrs = mins / 60;
+                if hrs > 0 {
+                    ui.label(format!(
+                        "Connected for {}h {}m {}s",
+                        hrs,
+                        mins % 60,
+                        secs % 60
+                    ));
+                } else if mins > 0 {
+                    ui.label(format!("Connected for {}m {}s", mins, secs % 60));
+                } else {
+                    ui.label(format!("Connected for {}s", secs));
+                }
+
+                let (btype, blevel) = *self.state.battery_info.lock().unwrap();
+                if btype == BATTERY_WIRED {
+                    ui.label("Power: wired");
+                } else if btype == BATTERY_PERCENT {
+                    let color = if blevel <= 15 {
+                        colors.danger
+                    } else if blevel <= 35 {
+                        colors.warning
+                    } else {
+                        colors.success
+                    };
+                    ui.colored_label(color, format!("Battery: {}% (Bluetooth)", blevel));
+                } else if btype == BATTERY_DISCONNECTED {
+                    ui.label("Battery: disconnected");
+                } else if btype == BATTERY_ALKALINE || btype == BATTERY_NIMH {
+                    let kind = if btype == BATTERY_NIMH {
+                        "NiMH"
+                    } else {
+                        "Alkaline"
+                    };
+                    let (color, level_str) = match blevel {
+                        0 => (colors.danger, "Empty"),
+                        1 => (colors.warning, "Low"),
+                        2 => (colors.warning, "Medium"),
+                        _ => (colors.success, "Full"),
+                    };
+                    ui.colored_label(color, format!("Battery: {} ({})", level_str, kind));
+                } else if btype == BATTERY_UNKNOWN && blevel <= 3 {
+                    let (color, level_str) = match blevel {
+                        0 => (colors.danger, "Empty"),
+                        1 => (colors.warning, "Low"),
+                        2 => (colors.warning, "Medium"),
+                        _ => (colors.success, "Full"),
+                    };
+                    ui.colored_label(color, format!("Battery: {} (wireless)", level_str));
+                } else {
+                    ui.label("Battery: unknown");
+                }
+            } else {
+                ui.colored_label(colors.danger, "Disconnected - no controller detected");
+                ui.label(
+                    egui::RichText::new("Plug in an XInput controller to begin.")
+                        .color(colors.muted),
+                );
+            }
+        });
+    }
+
+    fn settings_stats_card(&mut self, ui: &mut egui::Ui, colors: &Win11Colors) {
+        win11_card_frame(colors).show(ui, |ui| {
+            settings_card_title(ui, colors, "Statistics");
+            let count = self.state.key_press_counter.load(Ordering::Relaxed);
+            ui.label(format!("Total key presses recorded: {}", count));
+            ui.label(
+                egui::RichText::new("Saved to the active profile on exit.").color(colors.muted),
+            );
+        });
+    }
+
     fn toggle_startup(&self, enabled: bool) {
         if enabled {
             if let Ok(exe_path) = std::env::current_exe() {
@@ -2209,191 +2452,7 @@ impl eframe::App for JoyMapperApp {
                         }
                     }
 
-                    Tab::Settings => {
-                        let connected = *self.state.connected_device.lock().unwrap();
-
-                        win11_card_frame(&colors).show(ui, |ui| {
-                            ui.label(egui::RichText::new("General").size(16.0).strong().color(colors.text));
-                            ui.add_space(8.0);
-                            ui.checkbox(&mut self.state.close_to_tray, "Close button minimizes to system tray");
-                            if ui.checkbox(&mut self.state.start_minimized, "Start minimized to system tray").changed() {
-                                update_config(|cfg| cfg.start_minimized = self.state.start_minimized);
-                            }
-
-                            let mut paused = PAUSED.load(Ordering::SeqCst);
-                            if ui
-                                .checkbox(&mut paused, "Pause mapping (controller input passes through untouched)")
-                                .changed()
-                            {
-                                set_paused(paused);
-                            }
-                            ui.label(
-                                egui::RichText::new(
-                                    "While paused the app stops simulating keys completely. Pausing does not close it.",
-                                )
-                                .color(colors.muted),
-                            );
-                            ui.add_space(6.0);
-                            if ui.checkbox(&mut self.state.run_at_startup, "Start with Windows").changed() {
-                                self.toggle_startup(self.state.run_at_startup);
-                            }
-
-                            if ui.checkbox(&mut self.state.sound_enabled, "Play sound on controller press").changed() {
-                                self.state.sound_enabled_atomic.store(self.state.sound_enabled, Ordering::SeqCst);
-                            }
-
-                            ui.add_space(10.0);
-                            ui.horizontal(|ui| {
-                                ui.label("Theme");
-                                egui::ComboBox::from_id_source("theme_select")
-                                    .selected_text(match self.state.theme {
-                                        AppTheme::System => "Use Windows setting",
-                                        AppTheme::Light => "Light",
-                                        AppTheme::Dark => "Dark",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.state.theme, AppTheme::System, "Use Windows setting");
-                                        ui.selectable_value(&mut self.state.theme, AppTheme::Light, "Light");
-                                        ui.selectable_value(&mut self.state.theme, AppTheme::Dark, "Dark");
-                                    });
-                            });
-                        });
-
-                        ui.add_space(10.0);
-                        win11_card_frame(&colors).show(ui, |ui| {
-                            ui.label(egui::RichText::new("Updates").size(16.0).strong().color(colors.text));
-                            ui.add_space(8.0);
-                            ui.label(format!("JoyMapper Pro v{}", updater::CURRENT_VERSION));
-                            if ui
-                                .checkbox(
-                                    &mut self.state.auto_update,
-                                    "Check for updates automatically (once a day)",
-                                )
-                                .changed()
-                            {
-                                update_config(|cfg| cfg.auto_update = self.state.auto_update);
-                            }
-                            ui.add_space(6.0);
-
-                            let status = self.state.update_state.lock().unwrap().clone();
-                            let busy = matches!(
-                                status,
-                                updater::UpdateState::Checking
-                                    | updater::UpdateState::Downloading { .. }
-                            );
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(!busy, egui::Button::new("Check for updates"))
-                                    .clicked()
-                                {
-                                    spawn_update_check(
-                                        ui.ctx().clone(),
-                                        self.state.update_state.clone(),
-                                    );
-                                }
-                                match &status {
-                                    updater::UpdateState::Checking => {
-                                        ui.label(
-                                            egui::RichText::new("Checking...").color(colors.muted),
-                                        );
-                                    }
-                                    updater::UpdateState::UpToDate => {
-                                        ui.colored_label(colors.success, "You are up to date.");
-                                    }
-                                    updater::UpdateState::Available(release) => {
-                                        ui.colored_label(
-                                            colors.accent,
-                                            format!("v{} is available.", release.version),
-                                        );
-                                    }
-                                    updater::UpdateState::Downloading { progress, .. } => {
-                                        ui.label(format!(
-                                            "Downloading... {:.0}%",
-                                            progress * 100.0
-                                        ));
-                                    }
-                                    updater::UpdateState::Ready => {
-                                        ui.label("Restarting...");
-                                    }
-                                    updater::UpdateState::Error(e) => {
-                                        ui.colored_label(
-                                            colors.danger,
-                                            format!("Check failed: {}", e),
-                                        );
-                                    }
-                                    updater::UpdateState::Idle => {}
-                                }
-                            });
-                        });
-
-                        ui.add_space(10.0);
-                        win11_card_frame(&colors).show(ui, |ui| {
-                            ui.label(egui::RichText::new("Hardware").size(16.0).strong().color(colors.text));
-                            ui.add_space(8.0);
-                            if connected {
-                                ui.colored_label(colors.success, "Connected - controller active through XInput");
-                                ui.label(egui::RichText::new("Controller 0 | polling at 1000 Hz | XInput engine").color(colors.muted));
-                                let elapsed = self.state.connection_start.lock().unwrap().elapsed();
-                                let secs = elapsed.as_secs();
-                                let mins = secs / 60;
-                                let hrs = mins / 60;
-                                if hrs > 0 {
-                                    ui.label(format!("Connected for {}h {}m {}s", hrs, mins % 60, secs % 60));
-                                } else if mins > 0 {
-                                    ui.label(format!("Connected for {}m {}s", mins, secs % 60));
-                                } else {
-                                    ui.label(format!("Connected for {}s", secs));
-                                }
-
-                                let (btype, blevel) = *self.state.battery_info.lock().unwrap();
-                                if btype == BATTERY_WIRED {
-                                    ui.label("Power: wired");
-                                } else if btype == BATTERY_PERCENT {
-                                    let color = if blevel <= 15 {
-                                        colors.danger
-                                    } else if blevel <= 35 {
-                                        colors.warning
-                                    } else {
-                                        colors.success
-                                    };
-                                    ui.colored_label(color, format!("Battery: {}% (Bluetooth)", blevel));
-                                } else if btype == BATTERY_DISCONNECTED {
-                                    ui.label("Battery: disconnected");
-                                } else if btype == BATTERY_ALKALINE || btype == BATTERY_NIMH {
-                                    let kind = if btype == BATTERY_NIMH { "NiMH" } else { "Alkaline" };
-                                    let (color, level_str) = match blevel {
-                                        0 => (colors.danger, "Empty"),
-                                        1 => (colors.warning, "Low"),
-                                        2 => (colors.warning, "Medium"),
-                                        _ => (colors.success, "Full"),
-                                    };
-                                    ui.colored_label(color, format!("Battery: {} ({})", level_str, kind));
-                                } else if btype == BATTERY_UNKNOWN && blevel <= 3 {
-                                    let (color, level_str) = match blevel {
-                                        0 => (colors.danger, "Empty"),
-                                        1 => (colors.warning, "Low"),
-                                        2 => (colors.warning, "Medium"),
-                                        _ => (colors.success, "Full"),
-                                    };
-                                    ui.colored_label(color, format!("Battery: {} (wireless)", level_str));
-                                } else {
-                                    ui.label("Battery: unknown");
-                                }
-                            } else {
-                                ui.colored_label(colors.danger, "Disconnected - no controller detected");
-                                ui.label(egui::RichText::new("Plug in an XInput controller to begin.").color(colors.muted));
-                            }
-                        });
-
-                        ui.add_space(10.0);
-                        win11_card_frame(&colors).show(ui, |ui| {
-                            ui.label(egui::RichText::new("Statistics").size(16.0).strong().color(colors.text));
-                            ui.add_space(8.0);
-                            let count = self.state.key_press_counter.load(Ordering::Relaxed);
-                            ui.label(format!("Total key presses recorded: {}", count));
-                            ui.label(egui::RichText::new("Saved to the active profile on exit.").color(colors.muted));
-                        });
-                    }
+                    Tab::Settings => self.settings_tab(ui, &colors),
                 }
             });
 

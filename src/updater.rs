@@ -382,7 +382,7 @@ fn check_api() -> Result<Option<Release>, String> {
     }))
 }
 
-fn check_feed() -> Result<Option<Release>, String> {
+fn check_feed_for(current: &str) -> Result<Option<Release>, String> {
     let (status, body) = http_get(GITHUB_FEED, 2 * 1024 * 1024)?;
     if status != 200 {
         return Err(format!("GitHub release feed returned HTTP {}", status));
@@ -399,7 +399,7 @@ fn check_feed() -> Result<Option<Release>, String> {
         .ok_or_else(|| "malformed release feed".to_string())?;
     let tag = &rest[..end];
     let version = tag.trim_start_matches(['v', 'V']).to_string();
-    if !is_newer(&version, CURRENT_VERSION) {
+    if !is_newer(&version, current) {
         return Ok(None);
     }
     Ok(Some(Release {
@@ -411,6 +411,10 @@ fn check_feed() -> Result<Option<Release>, String> {
         ),
         size: 0,
     }))
+}
+
+fn check_feed() -> Result<Option<Release>, String> {
+    check_feed_for(CURRENT_VERSION)
 }
 
 pub fn check() -> Result<Option<Release>, String> {
