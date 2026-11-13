@@ -8,11 +8,12 @@ fn main() {
         res.set("LegalCopyright", "© M-Wolf Studio");
         res.set_icon("app_icon.ico");
 
-        res.set_manifest(r#"
+        res.set_manifest(
+            r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
     <assemblyIdentity
-        version="1.0.8.0"
+        version="1.0.9.0"
         processorArchitecture="*"
         name="MWolfStudio.ControllerMapped"
         type="win32"
@@ -38,7 +39,8 @@ fn main() {
         </dependentAssembly>
     </dependency>
 </assembly>
-"#);
+"#,
+        );
 
         if let Err(e) = res.compile() {
             eprintln!("Failed to compile Windows resources: {}", e);

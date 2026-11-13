@@ -28,6 +28,7 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 | 🎨 **Win11 Mica Backdrop** | Translucent acrylic-style background using `window-vibrancy` + DwmSetWindowAttribute |
 | 🌓 **Theme Support** | System (auto-dark/light via registry), Dark, Light |
 | 🚀 **Startup Launch** | Optional silent launch on Windows startup via `HKCU\...\Run` |
+| 🔄 **Auto-Update** | Checks the public release feed once a day, asks before installing, then replaces the exe and restarts automatically. Manual check in Settings → Updates or from the tray menu. |
 | 🗑️ **Clear Mapping** | 🗑 button in the Action column to reset any input to a single unmapped slot |
 | 👁️ **Row Highlight** | Full-width blue tint highlights the entire row when a controller button is pressed |
 | ⚡ **250 Hz Polling** | High-precision Windows timer (`timeBeginPeriod(1)`) for near-instant input response |
@@ -112,6 +113,14 @@ Left-click or double-click the icon also shows the mapper.
 | Reversible by | Resume button, tray menu, Settings checkbox | re-opening from the tray |
 
 Pause state survives restarts (it is stored as `paused` in `config.json`).
+
+### 🔄 Updates
+
+JoyMapper Pro checks the release feed once a day in both tray and window mode. When a newer build exists it asks first, downloads the new executable beside the current one, swaps it in and restarts automatically. Profiles and `config.json` stay next to the exe and are not touched.
+
+- **Manual check**: Settings → Updates → *Check for updates*, or right-click the tray icon → *Check for Updates...*
+- **Opt out**: Settings → Updates → uncheck *Check for updates automatically*
+- Updates are downloaded over HTTPS from the GitHub release mirror and only installed after the download is verified as a Windows executable.
 
 ### 🎮 All Supported Inputs
 

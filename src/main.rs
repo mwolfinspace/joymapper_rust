@@ -2,6 +2,7 @@
 
 mod admin;
 mod autostart;
+mod updater;
 
 use eframe::egui;
 use eframe::epaint::Color32;
@@ -537,9 +538,20 @@ struct AppConfig {
     /// controller input is left untouched for other programs.
     #[serde(default)]
     paused: bool,
+    /// Ask the release feed once a day whether a newer build exists.
+    #[serde(default = "default_auto_update")]
+    auto_update: bool,
+    /// Unix timestamp of the last successful update check (throttles the
+    /// automatic check to once per day).
+    #[serde(default)]
+    last_update_check: u64,
 }
 
 fn default_start_minimized() -> bool {
+    true
+}
+
+fn default_auto_update() -> bool {
     true
 }
 
@@ -548,6 +560,8 @@ impl Default for AppConfig {
         Self {
             start_minimized: default_start_minimized(),
             paused: false,
+            auto_update: default_auto_update(),
+            last_update_check: 0,
         }
     }
 }
@@ -606,6 +620,8 @@ struct AppState {
     key_press_counter: Arc<AtomicU64>,
     connection_start: Arc<Mutex<std::time::Instant>>,
     battery_info: Arc<Mutex<(u8, u8)>>,
+    auto_update: bool,
+    update_state: Arc<Mutex<updater::UpdateState>>,
 }
 
 impl AppState {
@@ -666,8 +682,7 @@ fn file_stamp(path: &std::path::Path) -> Option<(u64, u64)> {
 
 fn mutex_is_alive(name: *const u16) -> bool {
     unsafe {
-        let handle =
-            windows_sys::Win32::System::Threading::OpenMutexW(0x00100000, 0i32, name);
+        let handle = windows_sys::Win32::System::Threading::OpenMutexW(0x00100000, 0i32, name);
         if handle.is_null() {
             false
         } else {
@@ -968,11 +983,23 @@ unsafe extern "system" fn tray_wnd_proc(
                 let hmenu = CreatePopupMenu();
                 AppendMenuW(hmenu, MF_STRING, 101, windows_sys::w!("Show Mapper"));
                 let pause_label: Vec<u16> = if PAUSED.load(Ordering::SeqCst) {
-                    "Resume mapping".encode_utf16().chain(std::iter::once(0)).collect()
+                    "Resume mapping"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect()
                 } else {
-                    "Pause mapping".encode_utf16().chain(std::iter::once(0)).collect()
+                    "Pause mapping"
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect()
                 };
                 AppendMenuW(hmenu, MF_STRING, 103, pause_label.as_ptr());
+                AppendMenuW(
+                    hmenu,
+                    MF_STRING,
+                    104,
+                    windows_sys::w!("Check for Updates..."),
+                );
                 AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
                 AppendMenuW(hmenu, MF_STRING, 102, windows_sys::w!("Exit Program"));
                 let mut pt: POINT = std::mem::zeroed();
@@ -1036,6 +1063,11 @@ unsafe extern "system" fn tray_wnd_proc(
             101 => show_mapper_window(),
             103 => {
                 toggle_paused();
+            }
+            104 => {
+                // Never block the tray message loop: the check does network
+                // I/O and the prompt is modal to this thread.
+                std::thread::spawn(|| updater::tray_auto_check(false));
             }
             102 => {
                 persist_tray_counter();
@@ -1279,6 +1311,7 @@ impl JoyMapperApp {
         spawn_config_watcher(Some(cc.egui_ctx.clone()));
 
         let config = load_config();
+        let update_state = Arc::new(Mutex::new(updater::UpdateState::Idle));
 
         let mut app = Self {
             state: AppState {
@@ -1287,7 +1320,11 @@ impl JoyMapperApp {
                 active_tab: Tab::Mappings,
                 theme: AppTheme::System,
                 close_to_tray: true,
-                start_minimized: if std::env::args().any(|a| a == "--ui") { false } else { config.start_minimized },
+                start_minimized: if std::env::args().any(|a| a == "--ui") {
+                    false
+                } else {
+                    config.start_minimized
+                },
                 run_at_startup: false,
                 connected_device,
                 pressed_inputs,
@@ -1302,19 +1339,144 @@ impl JoyMapperApp {
                 key_press_counter,
                 connection_start,
                 battery_info,
+                auto_update: config.auto_update,
+                update_state: update_state.clone(),
             },
             window_icon,
             sound_engine,
-            window_visible: if std::env::args().any(|a| a == "--ui") { true } else { !config.start_minimized },
+            window_visible: if std::env::args().any(|a| a == "--ui") {
+                true
+            } else {
+                !config.start_minimized
+            },
         };
 
         app.state.save_to_disk();
         app.check_startup_registry();
+
+        updater::init_quit_event();
+        if config.auto_update && updater::check_due() {
+            spawn_update_check(cc.egui_ctx.clone(), update_state);
+        }
+
         app
     }
 
     fn check_startup_registry(&mut self) {
         self.state.run_at_startup = autostart::is_enabled();
+    }
+
+    /// Modal shown while an update is available, downloading, or restarting.
+    fn show_update_modal(&mut self, ctx: &egui::Context) {
+        let state = self.state.update_state.lock().unwrap().clone();
+        match state {
+            updater::UpdateState::Available(release) => {
+                egui::Window::new("Update available")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .min_width(460.0)
+                    .max_width(460.0)
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "JoyMapper Pro v{} is available",
+                                release.version
+                            ))
+                            .size(16.0)
+                            .strong(),
+                        );
+                        ui.label(format!("You are running v{}.", updater::CURRENT_VERSION));
+                        ui.add_space(8.0);
+                        if !release.notes.trim().is_empty() {
+                            egui::ScrollArea::vertical()
+                                .max_height(170.0)
+                                .show(ui, |ui| {
+                                    ui.label(release.notes.trim());
+                                });
+                        }
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Download & install").clicked() {
+                                start_update_download(
+                                    ctx.clone(),
+                                    self.state.update_state.clone(),
+                                    release.clone(),
+                                );
+                            }
+                            if ui.button("Later").clicked() {
+                                *self.state.update_state.lock().unwrap() =
+                                    updater::UpdateState::Idle;
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "The app will close, install the update and restart automatically.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    });
+            }
+            updater::UpdateState::Downloading { version, progress } => {
+                egui::Window::new("Installing update")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .min_width(360.0)
+                    .max_width(360.0)
+                    .show(ctx, |ui| {
+                        ui.label(format!("Downloading JoyMapper Pro v{}...", version));
+                        ui.add(egui::ProgressBar::new(progress).show_percentage());
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("The app will restart when the download finishes.")
+                                .small()
+                                .weak(),
+                        );
+                    });
+            }
+            updater::UpdateState::Ready => {
+                egui::Window::new("Restarting")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .min_width(320.0)
+                    .max_width(320.0)
+                    .show(ctx, |ui| {
+                        ui.label("Installing the update and restarting JoyMapper Pro...");
+                    });
+            }
+            updater::UpdateState::Error(message) => {
+                egui::Window::new("Update failed")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .min_width(420.0)
+                    .max_width(420.0)
+                    .show(ctx, |ui| {
+                        ui.label("The update could not be installed.");
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(&message).small().weak());
+                            });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                *self.state.update_state.lock().unwrap() =
+                                    updater::UpdateState::Idle;
+                            }
+                            if ui.button("Check again").clicked() {
+                                spawn_update_check(ctx.clone(), self.state.update_state.clone());
+                            }
+                        });
+                    });
+            }
+            _ => {}
+        }
     }
 
     fn toggle_startup(&self, enabled: bool) {
@@ -1395,6 +1557,13 @@ impl JoyMapperApp {
 // --- 5. UI RENDERING ---
 impl eframe::App for JoyMapperApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // The tray process (or the updater) asked every instance to exit so the
+        // executable can be replaced. Save first: profiles live next to the exe.
+        if updater::quit_requested() {
+            self.state.save_to_disk();
+            std::process::exit(0);
+        }
+
         // Keep the sound engine's OutputStream alive for the dedicated audio thread.
         let _binding = &self.sound_engine;
         // --- 1. WINDOW SYSTEM LOGIC ---
@@ -1430,22 +1599,19 @@ impl eframe::App for JoyMapperApp {
         }
 
         // --- WINDOW CLOSE BEHAVIOR ---
-        if ctx.input(|i| i.viewport().close_requested())
-            && self.state.close_to_tray {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.state.save_to_disk();
+        if ctx.input(|i| i.viewport().close_requested()) && self.state.close_to_tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.save_to_disk();
 
-                // The tray process keeps the single tray icon alive; only spawn
-                // one when it is not running yet.
-                if !is_tray_process_alive() {
-                    if let Ok(exe) = std::env::current_exe() {
-                        let _ = std::process::Command::new(exe)
-                            .arg("--tray")
-                            .spawn();
-                    }
+            // The tray process keeps the single tray icon alive; only spawn
+            // one when it is not running yet.
+            if !is_tray_process_alive() {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).arg("--tray").spawn();
                 }
-                std::process::exit(0);
             }
+            std::process::exit(0);
+        }
 
         // --- EARLY RETURN WHEN HIDDEN TO TRAY ---
         if !self.window_visible && self.state.rename_target.is_none() {
@@ -1634,9 +1800,23 @@ impl eframe::App for JoyMapperApp {
                     let tabs = [("Mappings", Tab::Mappings), ("Settings", Tab::Settings)];
                     for (label, tab) in &tabs {
                         let selected = self.state.active_tab == *tab;
-                        let text_color = if selected { egui::Color32::WHITE } else { colors.text };
-                        let bg = if selected { colors.accent } else { egui::Color32::TRANSPARENT };
-                            if ui.add(egui::Button::new(egui::RichText::new(*label).color(text_color)).fill(bg)).clicked() {
+                        let text_color = if selected {
+                            egui::Color32::WHITE
+                        } else {
+                            colors.text
+                        };
+                        let bg = if selected {
+                            colors.accent
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(*label).color(text_color))
+                                    .fill(bg),
+                            )
+                            .clicked()
+                        {
                             self.state.active_tab = *tab;
                         }
                     }
@@ -2081,6 +2261,73 @@ impl eframe::App for JoyMapperApp {
 
                         ui.add_space(10.0);
                         win11_card_frame(&colors).show(ui, |ui| {
+                            ui.label(egui::RichText::new("Updates").size(16.0).strong().color(colors.text));
+                            ui.add_space(8.0);
+                            ui.label(format!("JoyMapper Pro v{}", updater::CURRENT_VERSION));
+                            if ui
+                                .checkbox(
+                                    &mut self.state.auto_update,
+                                    "Check for updates automatically (once a day)",
+                                )
+                                .changed()
+                            {
+                                update_config(|cfg| cfg.auto_update = self.state.auto_update);
+                            }
+                            ui.add_space(6.0);
+
+                            let status = self.state.update_state.lock().unwrap().clone();
+                            let busy = matches!(
+                                status,
+                                updater::UpdateState::Checking
+                                    | updater::UpdateState::Downloading { .. }
+                            );
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(!busy, egui::Button::new("Check for updates"))
+                                    .clicked()
+                                {
+                                    spawn_update_check(
+                                        ui.ctx().clone(),
+                                        self.state.update_state.clone(),
+                                    );
+                                }
+                                match &status {
+                                    updater::UpdateState::Checking => {
+                                        ui.label(
+                                            egui::RichText::new("Checking...").color(colors.muted),
+                                        );
+                                    }
+                                    updater::UpdateState::UpToDate => {
+                                        ui.colored_label(colors.success, "You are up to date.");
+                                    }
+                                    updater::UpdateState::Available(release) => {
+                                        ui.colored_label(
+                                            colors.accent,
+                                            format!("v{} is available.", release.version),
+                                        );
+                                    }
+                                    updater::UpdateState::Downloading { progress, .. } => {
+                                        ui.label(format!(
+                                            "Downloading... {:.0}%",
+                                            progress * 100.0
+                                        ));
+                                    }
+                                    updater::UpdateState::Ready => {
+                                        ui.label("Restarting...");
+                                    }
+                                    updater::UpdateState::Error(e) => {
+                                        ui.colored_label(
+                                            colors.danger,
+                                            format!("Check failed: {}", e),
+                                        );
+                                    }
+                                    updater::UpdateState::Idle => {}
+                                }
+                            });
+                        });
+
+                        ui.add_space(10.0);
+                        win11_card_frame(&colors).show(ui, |ui| {
                             ui.label(egui::RichText::new("Hardware").size(16.0).strong().color(colors.text));
                             ui.add_space(8.0);
                             if connected {
@@ -2216,6 +2463,8 @@ impl eframe::App for JoyMapperApp {
                 self.state.rename_target = None;
             }
         }
+
+        self.show_update_modal(ctx);
     }
 }
 
@@ -2270,7 +2519,10 @@ fn start_hardware_threads(
             }
 
             if let Some(ref ctx) = ctx_poll {
-                if UI_VISIBLE.load(Ordering::Relaxed) && connected && last_battery_query.elapsed() > Duration::from_secs(30) {
+                if UI_VISIBLE.load(Ordering::Relaxed)
+                    && connected
+                    && last_battery_query.elapsed() > Duration::from_secs(30)
+                {
                     let (btype, blevel) = query_battery(0);
                     let mut battery = battery_poll.lock().unwrap();
                     if battery.0 != BATTERY_PERCENT || btype == BATTERY_WIRED {
@@ -2284,7 +2536,11 @@ fn start_hardware_threads(
             let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
             let target = if connected {
                 let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
-                if is_idle { SLOW_MS } else { FAST_MS }
+                if is_idle {
+                    SLOW_MS
+                } else {
+                    FAST_MS
+                }
             } else if last_connected_time.elapsed() >= DISCONNECT_IDLE_TIMEOUT {
                 DISCONNECTED_POLL_MS
             } else {
@@ -2542,6 +2798,30 @@ fn run_tray_mode() {
     }
     init_tray_icon();
 
+    updater::init_quit_event();
+
+    // Exit when the UI process or an update asks all instances to stop.
+    std::thread::spawn(|| unsafe {
+        let handle = updater::quit_handle_raw();
+        if !handle.is_null() {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(
+                handle,
+                windows_sys::Win32::System::Threading::INFINITE,
+            );
+            std::thread::sleep(Duration::from_millis(250));
+            persist_tray_counter();
+            std::process::exit(0);
+        }
+    });
+
+    // Most users stay in tray mode, so the daily check has to run here too.
+    if load_config().auto_update {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(10));
+            updater::tray_auto_check(true);
+        });
+    }
+
     let (profiles, current_profile_name) = load_profiles();
 
     let initial_mapping = profiles
@@ -2601,6 +2881,83 @@ fn ensure_tray_process() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).arg("--tray").spawn();
     }
+}
+
+/// Query the release feed in the background and publish the result to the UI.
+fn spawn_update_check(ctx: egui::Context, state: Arc<Mutex<updater::UpdateState>>) {
+    {
+        let current = state.lock().unwrap();
+        if matches!(
+            *current,
+            updater::UpdateState::Checking | updater::UpdateState::Downloading { .. }
+        ) {
+            return;
+        }
+    }
+    *state.lock().unwrap() = updater::UpdateState::Checking;
+    ctx.request_repaint();
+
+    std::thread::spawn(move || {
+        let next = match updater::check_and_mark() {
+            Ok(Some(release)) => updater::UpdateState::Available(release),
+            Ok(None) => updater::UpdateState::UpToDate,
+            Err(e) => updater::UpdateState::Error(e),
+        };
+        *state.lock().unwrap() = next;
+        ctx.request_repaint();
+    });
+}
+
+/// Download, install, and restart after the user confirms the update.
+fn start_update_download(
+    ctx: egui::Context,
+    state: Arc<Mutex<updater::UpdateState>>,
+    release: updater::Release,
+) {
+    *state.lock().unwrap() = updater::UpdateState::Downloading {
+        version: release.version.clone(),
+        progress: 0.0,
+    };
+    ctx.request_repaint();
+
+    std::thread::spawn(move || {
+        let mut last_reported = -1.0_f32;
+        let progress_state = state.clone();
+        let progress_ctx = ctx.clone();
+        let version = release.version.clone();
+
+        let result = updater::install(&release, true, &mut |done, total| {
+            let progress = if total > 0 {
+                (done as f32 / total as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if progress - last_reported >= 0.01 || progress >= 1.0 {
+                last_reported = progress;
+                *progress_state.lock().unwrap() = updater::UpdateState::Downloading {
+                    version: version.clone(),
+                    progress,
+                };
+                progress_ctx.request_repaint();
+            }
+        });
+
+        match result {
+            Ok(()) => {
+                *state.lock().unwrap() = updater::UpdateState::Ready;
+                ctx.request_repaint();
+                // Ask the tray process to exit as well, then release the exe so
+                // the helper script can swap it and start the new build.
+                updater::request_quit();
+                std::thread::sleep(Duration::from_millis(900));
+                std::process::exit(0);
+            }
+            Err(e) => {
+                *state.lock().unwrap() = updater::UpdateState::Error(e);
+                ctx.request_repaint();
+            }
+        }
+    });
 }
 
 fn main() -> eframe::Result<()> {
