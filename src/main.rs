@@ -218,6 +218,125 @@ fn get_display_name(raw: &str) -> String {
     }
 }
 
+/// Convert an egui key event into the internal key token used by profiles.
+/// Modifiers are not `egui::Key` variants in egui 0.27; they are tracked
+/// separately from `InputState::modifiers`.
+fn key_token(key: egui::Key) -> Option<String> {
+    if key == egui::Key::Escape {
+        return None;
+    }
+    let raw = format!("{:?}", key).to_lowercase();
+    let token = match raw.as_str() {
+        "openbracket" => "[",
+        "closebracket" => "]",
+        "backslash" | "pipe" => "\\",
+        "semicolon" | "colon" => ";",
+        "quote" => "'",
+        "comma" => ",",
+        "period" => ".",
+        "minus" => "-",
+        "equals" | "plus" | "equal" => "=",
+        "backtick" | "grave" | "graveaccent" => "`",
+        "slash" | "questionmark" => "/",
+        "pageup" => "pgup",
+        "pagedown" => "pgdown",
+        // egui synthesizes these from Ctrl+C/X/V; they are not real key presses.
+        "copy" | "cut" | "paste" => return None,
+        // Numpad operator keys from egui (Key::NumpadAdd, etc.)
+        "numpadadd" => "num+",
+        "numpadsubtract" => "num-",
+        "numpadmultiply" => "num*",
+        "numpaddivide" => "num/",
+        "numpaddecimal" => "num.",
+        "numpadenter" => "num_enter",
+        other => {
+            // egui top-row number keys: Key::Num0..Num9 (VK 0x30-0x39).
+            if other.len() == 4 && other.starts_with("num") {
+                if let Ok(d) = other[3..].parse::<u8>() {
+                    if d <= 9 {
+                        return Some(d.to_string());
+                    }
+                }
+            }
+            // egui numpad digit keys: Key::Numpad0..Numpad9 (VK 0x60-0x69).
+            if other.len() == 7 && other.starts_with("numpad") {
+                if let Ok(d) = other[6..].parse::<u8>() {
+                    if d <= 9 {
+                        return Some(format!("num{}", d));
+                    }
+                }
+            }
+            other
+        }
+    };
+    // Windows has no virtual-key code past F24, so those keys cannot be played.
+    if let Some(num) = token.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
+        if num > 24 {
+            return None;
+        }
+    }
+    Some(token.to_string())
+}
+
+/// Captures a keyboard combo the way mainstream shortcut editors do: every key
+/// that is held joins the combo and nothing is committed until *all* keys and
+/// modifiers have been released. The widest set held at any moment wins, so
+/// releasing Ctrl before S still yields `ctrl+s` instead of stopping at `ctrl`.
+#[derive(Default)]
+struct ComboRecorder {
+    /// Keys seen since the recording started, in the order they were pressed.
+    order: Vec<String>,
+    /// Widest combo observed so far.
+    best: Vec<String>,
+}
+
+impl ComboRecorder {
+    fn clear(&mut self) {
+        self.order.clear();
+        self.best.clear();
+    }
+
+    fn best_combo(&self) -> &[String] {
+        &self.best
+    }
+
+    /// Feed one frame of input: `mods` are the modifier tokens currently held,
+    /// `pressed` the key-down events of this frame, `down` every key egui still
+    /// reports as held. Returns the finished combo once nothing is held anymore.
+    fn update(&mut self, mods: &[String], pressed: &[String], down: &[String]) -> Option<String> {
+        for token in pressed.iter().chain(down.iter()) {
+            if !self.order.contains(token) {
+                self.order.push(token.clone());
+            }
+        }
+
+        // Modifiers first, then the remaining keys in press order.
+        let mut current: Vec<String> = mods.to_vec();
+        for token in &self.order {
+            let held = pressed.contains(token) || down.contains(token);
+            if held && !current.contains(token) {
+                current.push(token.clone());
+            }
+        }
+        if current.len() > self.best.len() {
+            self.best = current.clone();
+        }
+
+        // Still holding something: keep recording.
+        if !current.is_empty() {
+            return None;
+        }
+        // Everything released. Commit only if something was actually captured;
+        // otherwise keep waiting for the first key press.
+        if self.best.is_empty() {
+            return None;
+        }
+        let combo = self.best.join("+");
+        self.clear();
+        Some(combo)
+    }
+}
+
 fn simulate_key(vk: u16, key_up: bool) {
     unsafe {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -579,33 +698,35 @@ fn input_display_name(raw: &str) -> String {
         .replace('_', " ")
 }
 
+/// Height of one mapping row. Every row is laid out inside a container of
+/// exactly this height so no row can end up taller than the others.
+const ROW_HEIGHT: f32 = 26.0;
+
 /// Shared column geometry for the mapping table so the header and every row
 /// line up: Input (centered), Mapped keys (left), Action (right).
-fn mapping_columns(ui: &egui::Ui) -> (f32, f32) {
+fn mapping_columns(ui: &egui::Ui) -> (f32, f32, f32) {
     const INPUT_COL_W: f32 = 120.0;
     const ACTION_COL_W: f32 = 204.0;
     let spacing = ui.spacing().item_spacing.x;
-    let keys_w =
-        (ui.available_width() - INPUT_COL_W - ACTION_COL_W - spacing * 4.0).max(170.0);
-    (INPUT_COL_W, keys_w)
+    let keys_w = (ui.available_width() - INPUT_COL_W - ACTION_COL_W - spacing * 4.0).max(170.0);
+    (INPUT_COL_W, keys_w, ACTION_COL_W)
 }
 
 /// Colour code for a loop step. Steps 1-5 are blue, green, yellow, red and
 /// purple; later steps repeat the palette (the number badge keeps them apart).
 fn loop_step_color(step: usize) -> Color32 {
     const PALETTE: [Color32; 5] = [
-        Color32::from_rgb(0, 145, 220),   // 1 blue
-        Color32::from_rgb(38, 172, 92),   // 2 green
-        Color32::from_rgb(230, 166, 0),   // 3 yellow
-        Color32::from_rgb(224, 76, 76),   // 4 red
-        Color32::from_rgb(150, 90, 214),  // 5 purple
+        Color32::from_rgb(0, 145, 220),  // 1 blue
+        Color32::from_rgb(38, 172, 92),  // 2 green
+        Color32::from_rgb(230, 166, 0),  // 3 yellow
+        Color32::from_rgb(224, 76, 76),  // 4 red
+        Color32::from_rgb(150, 90, 214), // 5 purple
     ];
     PALETTE[step % PALETTE.len()]
 }
 
 fn contrast_text(color: Color32) -> Color32 {
-    let luma =
-        0.299 * color.r() as f32 + 0.587 * color.g() as f32 + 0.114 * color.b() as f32;
+    let luma = 0.299 * color.r() as f32 + 0.587 * color.g() as f32 + 0.114 * color.b() as f32;
     if luma > 165.0 {
         Color32::BLACK
     } else {
@@ -662,8 +783,7 @@ fn format_key_combo(raw: &str) -> String {
 
 /// Draw a small coloured circle with a step number (used in the table header).
 fn step_badge(ui: &mut egui::Ui, step: usize, diameter: f32) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
     let color = loop_step_color(step.saturating_sub(1));
     let painter = ui.painter();
     painter.circle_filled(rect.center(), diameter * 0.5, color);
@@ -695,19 +815,16 @@ fn loop_pill(
     } else {
         colors.text
     };
-    let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
-        egui::FontId::monospace(12.0),
-        text_color,
-    );
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), egui::FontId::monospace(12.0), text_color);
 
     let badge_d = 18.0;
     let pad_x = 7.0;
     let gap = 7.0;
     let height = 26.0;
     let width = pad_x * 2.0 + badge_d + gap + galley.size().x;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
@@ -847,6 +964,8 @@ struct AppState {
     active_mapping: Arc<Mutex<HashMap<String, Vec<String>>>>,
     recording_key: Option<String>,
     recording_slot: Option<usize>,
+    /// Live combo capture for the pill being recorded.
+    recorder: ComboRecorder,
     window_configured: bool,
     sound_enabled: bool,
     sound_enabled_atomic: Arc<AtomicBool>,
@@ -1567,6 +1686,7 @@ impl JoyMapperApp {
                 active_mapping,
                 recording_key: None,
                 recording_slot: None,
+                recorder: ComboRecorder::default(),
                 window_configured: false,
                 sound_enabled: true,
                 sound_enabled_atomic: sound_enabled,
@@ -2094,119 +2214,90 @@ impl eframe::App for JoyMapperApp {
         let is_dark = matches!(self.state.theme, AppTheme::Dark)
             || (matches!(self.state.theme, AppTheme::System) && is_windows_dark_mode());
 
-        let recording_result = if let Some(ref target_key) = self.state.recording_key {
-            ctx.input(|i| {
-                let mut key_names: Vec<String> = Vec::new();
-                if i.modifiers.ctrl {
-                    key_names.push("ctrl".to_string());
-                }
-                if i.modifiers.shift {
-                    key_names.push("shift".to_string());
-                }
-                if i.modifiers.alt {
-                    key_names.push("alt".to_string());
-                }
-                if i.modifiers.mac_cmd {
-                    key_names.push("win".to_string());
-                }
+        // --- Combo recording ---
+        // The recording only finishes once *all* keys and modifiers are
+        // released, so holding Ctrl and then pressing S captures `ctrl+s`
+        // instead of stopping at the first key.
+        let mut recording_assign: Option<(String, String)> = None;
 
-                let key_event = i.events.iter().find_map(|e| {
-                    if let egui::Event::Key {
-                        key, pressed: true, ..
-                    } = e
-                    {
-                        // Escape cancels recording without assigning
-                        if *key == egui::Key::Escape {
-                            return Some("__cancel__".to_string());
+        if self.state.recording_key.is_some() {
+            let (cancel, mods_now, pressed_now, down_now) = ctx.input(|i| {
+                let cancel = i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            ..
                         }
-                        let raw = format!("{:?}", key).to_lowercase();
-                        // Normalize egui Key debug names → our internal parse_key_string tokens.
-                        // egui names OEM keys like Key::OpenBracket, Key::CloseBracket, etc.
-                        // but our engine expects "[", "]", ";", etc.
-                        let normalized = match raw.as_str() {
-                            "openbracket" => "[".to_string(),
-                            "closebracket" => "]".to_string(),
-                            "backslash" => "\\".to_string(),
-                            "semicolon" => ";".to_string(),
-                            "quote" => "'".to_string(),
-                            "comma" => ",".to_string(),
-                            "period" => ".".to_string(),
-                            "minus" => "-".to_string(),
-                            "equals" | "plus" | "equal" => "=".to_string(),
-                            "backtick" | "grave" | "graveaccent" => "`".to_string(),
-                            "slash" => "/".to_string(),
-                            // Numpad operator keys from egui (Key::NumpadAdd, etc.)
-                            "numpadadd" => "num+".to_string(),
-                            "numpadsubtract" => "num-".to_string(),
-                            "numpadmultiply" => "num*".to_string(),
-                            "numpaddivide" => "num/".to_string(),
-                            "numpaddecimal" => "num.".to_string(),
-                            "numpadenter" => "num_enter".to_string(),
-                            other => {
-                                // egui top-row number keys: Key::Num0..Num9
-                                //   debug format → "num0".."num9"
-                                //   These are the NUMBER ROW (VK 0x30-0x39), NOT numpad.
-                                //   Token must be the bare digit so parse_key_string returns 0x30+n.
-                                if other.len() == 4 && other.starts_with("num") {
-                                    if let Ok(d) = other[3..].parse::<u8>() {
-                                        if d <= 9 {
-                                            return Some(d.to_string());
-                                        }
-                                    }
-                                }
-                                // egui numpad digit keys: Key::Numpad0..Numpad9
-                                //   debug format → "numpad0".."numpad9"
-                                //   These ARE the numpad (VK 0x60-0x69).
-                                //   Token = "num0".."num9" so parse_key_string returns 0x60+n.
-                                if other.len() == 7 && other.starts_with("numpad") {
-                                    if let Ok(d) = other[6..].parse::<u8>() {
-                                        if d <= 9 {
-                                            return Some(format!("num{}", d));
-                                        }
-                                    }
-                                }
-                                other.to_string()
-                            }
-                        };
-                        Some(normalized)
-                    } else {
-                        None
-                    }
+                    )
                 });
 
-                key_event.map(|k| {
-                    key_names.push(k);
-                    (target_key.clone(), key_names.join("+"))
-                })
-            })
-        } else {
-            None
-        };
+                let pressed: Vec<String> = i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        } => key_token(*key),
+                        _ => None,
+                    })
+                    .collect();
 
-        if let Some((k, macro_str)) = recording_result {
-            if macro_str == "__cancel__" {
+                let down: Vec<String> = i.keys_down.iter().filter_map(|k| key_token(*k)).collect();
+
+                let mut mods = Vec::new();
+                if i.modifiers.ctrl {
+                    mods.push("ctrl".to_string());
+                }
+                if i.modifiers.shift {
+                    mods.push("shift".to_string());
+                }
+                if i.modifiers.alt {
+                    mods.push("alt".to_string());
+                }
+                if i.modifiers.mac_cmd {
+                    mods.push("win".to_string());
+                }
+
+                (cancel, mods, pressed, down)
+            });
+
+            if cancel {
                 self.state.recording_key = None;
                 self.state.recording_slot = None;
-            } else {
-                let slot = self.state.recording_slot.take().unwrap_or(0);
-                if let Some(keys_vec) = self
-                    .state
-                    .profiles
-                    .get_mut(&self.state.current_profile_name)
-                    .unwrap()
-                    .mappings
-                    .get_mut(&k)
-                {
-                    if slot < keys_vec.len() {
-                        keys_vec[slot] = macro_str;
-                    } else {
-                        keys_vec.push(macro_str);
-                    }
-                }
-                self.state.save_to_disk();
-                self.state.recording_key = None;
-                ctx.request_repaint();
+                self.state.recorder.clear();
+            } else if let Some(macro_str) =
+                self.state
+                    .recorder
+                    .update(&mods_now, &pressed_now, &down_now)
+            {
+                let target = self.state.recording_key.take().unwrap();
+                recording_assign = Some((target, macro_str));
             }
+        }
+
+        if let Some((k, macro_str)) = recording_assign {
+            let slot = self.state.recording_slot.take().unwrap_or(0);
+            if let Some(keys_vec) = self
+                .state
+                .profiles
+                .get_mut(&self.state.current_profile_name)
+                .unwrap()
+                .mappings
+                .get_mut(&k)
+            {
+                if slot < keys_vec.len() {
+                    keys_vec[slot] = macro_str;
+                } else {
+                    keys_vec.push(macro_str);
+                }
+            }
+            self.state.save_to_disk();
+            ctx.request_repaint();
         }
 
         // --- 3. UI RENDERING ---
@@ -2374,7 +2465,11 @@ impl eframe::App for JoyMapperApp {
                                     self.state.save_to_disk();
                                 }
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let toolbar_right_w = ui.available_width();
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(toolbar_right_w, 26.0),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
                                     let paused = PAUSED.load(Ordering::SeqCst);
                                     let label = if paused { "Resume" } else { "Pause" };
                                     if ui
@@ -2405,9 +2500,19 @@ impl eframe::App for JoyMapperApp {
                                 .rounding(egui::Rounding::same(8.0))
                                 .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                                 .show(ui, |ui| {
+                                    let captured = self.state.recorder.best_combo();
+                                    let hint = if captured.is_empty() {
+                                        "Hold the key or combo, then release all keys to confirm. Esc cancels."
+                                            .to_string()
+                                    } else {
+                                        format!(
+                                            "Captured: {} — release all keys to confirm, Esc cancels.",
+                                            format_key_combo(&captured.join("+"))
+                                        )
+                                    };
                                     ui.colored_label(
                                         colors.warning,
-                                        format!("Recording {}. Press a key or combo, Esc cancels.", input_display_name(rec_key)),
+                                        format!("Recording {}. {}", input_display_name(rec_key), hint),
                                     );
                                 });
                         }
@@ -2431,7 +2536,7 @@ impl eframe::App for JoyMapperApp {
                                 .rounding(egui::Rounding::same(6.0))
                                 .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
-                                    let (input_w, keys_w) = mapping_columns(ui);
+                                    let (input_w, keys_w, action_w) = mapping_columns(ui);
                                     let spacing = ui.spacing().item_spacing.x;
                                     ui.horizontal(|ui| {
                                         ui.allocate_ui_with_layout(
@@ -2477,9 +2582,13 @@ impl eframe::App for JoyMapperApp {
                                             },
                                         );
                                         ui.add_space(spacing);
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            ui.label(egui::RichText::new("Action").small().strong().color(colors.muted));
-                                        });
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(action_w, 22.0),
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(egui::RichText::new("Action").small().strong().color(colors.muted));
+                                            },
+                                        );
                                     });
                                 });
                             ui.add_space(6.0);
@@ -2502,9 +2611,20 @@ impl eframe::App for JoyMapperApp {
                                             .rounding(egui::Rounding::same(6.0))
                                             .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                                             .show(ui, |ui| {
-                                                let (input_w, keys_w) = mapping_columns(ui);
+                                                let (input_w, keys_w, action_w) = mapping_columns(ui);
                                                 let spacing = ui.spacing().item_spacing.x;
-                                                ui.horizontal_top(|ui| {
+                                                // Bound the row to ROW_HEIGHT: a child that
+                                                // centres itself in "the rest of the space"
+                                                // (e.g. the Action column) would otherwise
+                                                // stretch this row -- and only this row -- to
+                                                // the height left in the scroll area.
+                                                ui.allocate_ui_with_layout(
+                                                    egui::vec2(
+                                                        input_w + keys_w + action_w + spacing * 4.0,
+                                                        ROW_HEIGHT,
+                                                    ),
+                                                    egui::Layout::left_to_right(egui::Align::Center),
+                                                    |ui| {
                                                     // Input column: centered
                                                     ui.allocate_ui_with_layout(
                                                         egui::vec2(input_w, 26.0),
@@ -2522,13 +2642,15 @@ impl eframe::App for JoyMapperApp {
                                                         .get_mut(*input_name)
                                                         .unwrap();
 
-                                                    // Mapped keys column: left aligned, wraps inside the column
+                                                    // Mapped keys column: left aligned, single line so every
+                                                    // row stays at exactly ROW_HEIGHT (no multi-line wrap
+                                                    // that could make one row taller than the rest).
                                                     ui.allocate_ui_with_layout(
                                                         egui::vec2(keys_w, 26.0),
                                                         egui::Layout::left_to_right(egui::Align::Center),
                                                         |ui| {
                                                         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                                                        ui.horizontal_wrapped(|ui| {
+                                                        ui.horizontal(|ui| {
                                                         for idx in 0..key_slots.len() {
                                                             let current_val = &key_slots[idx];
                                                             let display = format_key_combo(current_val);
@@ -2694,8 +2816,12 @@ impl eframe::App for JoyMapperApp {
                                                     );
                                                     ui.add_space(spacing);
 
-                                                    // Action column: right aligned
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    // Action column: right aligned, bounded height so
+                                                    // the row never stretches vertically.
+                                                    ui.allocate_ui_with_layout(
+                                                        egui::vec2(action_w, 26.0),
+                                                        egui::Layout::right_to_left(egui::Align::Center),
+                                                        |ui| {
                                                         if ui
                                                             .add_enabled(
                                                                 key_slots.len() < 10,
@@ -2720,7 +2846,8 @@ impl eframe::App for JoyMapperApp {
                                                             needs_save = true;
                                                         }
                                                     });
-                                                });
+                                                    },
+                                                );
                                             });
                                         ui.add_space(2.0);
                                     }
@@ -2746,6 +2873,7 @@ impl eframe::App for JoyMapperApp {
                         if let Some((name, slot)) = recording_click {
                             self.state.recording_key = Some(name);
                             self.state.recording_slot = Some(slot);
+                            self.state.recorder.clear();
                             ctx.request_repaint();
                         }
                         if needs_save {
@@ -3414,7 +3542,10 @@ mod loop_key_tests {
     fn legacy_combo_entries_collapse_to_one_step() {
         let mut mappings = HashMap::new();
         mappings.insert("A".to_string(), vec!["ctrl".into(), "s".into()]);
-        mappings.insert("B".to_string(), vec!["shift".into(), "alt".into(), "f5".into()]);
+        mappings.insert(
+            "B".to_string(),
+            vec!["shift".into(), "alt".into(), "f5".into()],
+        );
         normalize_legacy_combos(&mut mappings);
         assert_eq!(mappings["A"], vec!["ctrl+s".to_string()]);
         assert_eq!(mappings["B"], vec!["shift+alt+f5".to_string()]);
@@ -3427,7 +3558,10 @@ mod loop_key_tests {
         mappings.insert("X".to_string(), vec!["ctrl+c".into(), "ctrl+v".into()]);
         normalize_legacy_combos(&mut mappings);
         assert_eq!(mappings["A"], vec!["l".to_string(), "o".to_string()]);
-        assert_eq!(mappings["X"], vec!["ctrl+c".to_string(), "ctrl+v".to_string()]);
+        assert_eq!(
+            mappings["X"],
+            vec!["ctrl+c".to_string(), "ctrl+v".to_string()]
+        );
     }
 
     #[test]
@@ -3444,5 +3578,144 @@ mod loop_key_tests {
         assert_eq!(format_key_combo("l"), "L");
         assert_eq!(format_key_combo("ctrl+s"), "Ctrl + S");
         assert_eq!(format_key_combo("shift+alt+f5"), "Shift + Alt + F5");
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn combo_capture_waits_for_all_keys() {
+        let mut rec = ComboRecorder::default();
+
+        // Ctrl is pressed and held: nothing is committed yet.
+        assert_eq!(rec.update(&s(&["ctrl"]), &[], &[]), None);
+        assert_eq!(rec.best_combo(), ["ctrl"]);
+
+        // S is pressed while Ctrl is still down: still recording.
+        assert_eq!(rec.update(&s(&["ctrl"]), &s(&["s"]), &s(&["s"])), None);
+        assert_eq!(rec.best_combo().join("+"), "ctrl+s");
+
+        // S is released first, Ctrl is still held: no premature commit.
+        assert_eq!(rec.update(&s(&["ctrl"]), &[], &[]), None);
+
+        // Everything released: the whole combo is committed once.
+        assert_eq!(rec.update(&[], &[], &[]), Some("ctrl+s".to_string()));
+        assert!(rec.best_combo().is_empty());
+    }
+
+    #[test]
+    fn combo_capture_handles_two_plain_keys() {
+        let mut rec = ComboRecorder::default();
+
+        // Hold A, then press B while A is still down.
+        assert_eq!(rec.update(&[], &s(&["a"]), &s(&["a"])), None);
+        assert_eq!(rec.update(&[], &s(&["b"]), &s(&["a", "b"])), None);
+        assert_eq!(rec.best_combo().join("+"), "a+b");
+
+        // Releasing A early keeps the wider combo.
+        assert_eq!(rec.update(&[], &[], &s(&["b"])), None);
+        assert_eq!(rec.update(&[], &[], &[]), Some("a+b".to_string()));
+    }
+
+    #[test]
+    fn combo_capture_handles_a_single_frame_tap() {
+        let mut rec = ComboRecorder::default();
+
+        // Press and release inside one frame: the key-down event still counts.
+        assert_eq!(rec.update(&[], &s(&["g"]), &[]), None);
+        assert_eq!(rec.update(&[], &[], &[]), Some("g".to_string()));
+    }
+
+    #[test]
+    fn combo_capture_ignores_empty_frames() {
+        let mut rec = ComboRecorder::default();
+
+        // Frames with nothing held must not end the recording before a key
+        // has been captured.
+        assert_eq!(rec.update(&[], &[], &[]), None);
+        assert_eq!(rec.update(&[], &[], &[]), None);
+
+        // A bare modifier is still a valid single step.
+        assert_eq!(rec.update(&s(&["ctrl"]), &[], &[]), None);
+        assert_eq!(rec.update(&[], &[], &[]), Some("ctrl".to_string()));
+    }
+
+    #[test]
+    fn combo_capture_accepts_any_keys() {
+        // K + L: no modifier required.
+        let mut rec = ComboRecorder::default();
+        assert_eq!(rec.update(&[], &s(&["k"]), &s(&["k"])), None);
+        assert_eq!(rec.update(&[], &s(&["l"]), &s(&["k", "l"])), None);
+        assert_eq!(rec.update(&[], &[], &[]), Some("k+l".to_string()));
+
+        // Punctuation + digit: "," + "0".
+        let mut rec = ComboRecorder::default();
+        assert_eq!(rec.update(&[], &s(&[","]), &s(&[","])), None);
+        assert_eq!(rec.update(&[], &s(&["0"]), &s(&[",", "0"])), None);
+        assert_eq!(rec.update(&[], &[], &[]), Some(",+0".to_string()));
+
+        // Three keys held together.
+        let mut rec = ComboRecorder::default();
+        assert_eq!(rec.update(&[], &s(&["e"]), &s(&["e"])), None);
+        assert_eq!(rec.update(&[], &s(&["j"]), &s(&["e", "j"])), None);
+        assert_eq!(rec.update(&[], &s(&["k"]), &s(&["e", "j", "k"])), None);
+        assert_eq!(rec.update(&[], &[], &[]), Some("e+j+k".to_string()));
+    }
+
+    #[test]
+    fn captured_combos_are_playable() {
+        // Every part of a captured combo must resolve to a virtual key,
+        // otherwise playback would silently drop it.
+        for combo in ["k+l", ",+0", "e+j+k", "ctrl+shift+s", "shift+;"] {
+            for part in combo.split('+') {
+                assert!(parse_key_string(part).is_some(), "{} is not playable", part);
+            }
+            assert!(!format_key_combo(combo).contains("None"));
+        }
+    }
+
+    #[test]
+    fn every_key_is_assignable_except_escape() {
+        for key in egui::Key::ALL {
+            match key_token(*key) {
+                Some(token) => assert!(
+                    parse_key_string(&token).is_some(),
+                    "{:?} produced token {:?}, which the engine cannot play",
+                    key,
+                    token
+                ),
+                None => {
+                    // Escape cancels the recording; the clipboard pseudo-keys
+                    // and F25+ (no virtual-key code) cannot be assigned.
+                    let name = format!("{:?}", key);
+                    let f25_plus = name
+                        .strip_prefix('F')
+                        .and_then(|n| n.parse::<u8>().ok())
+                        .map_or(false, |n| n > 24);
+                    assert!(
+                        f25_plus
+                            || matches!(
+                                key,
+                                egui::Key::Escape
+                                    | egui::Key::Copy
+                                    | egui::Key::Cut
+                                    | egui::Key::Paste
+                            ),
+                        "{:?} is silently ignored",
+                        key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn key_tokens_match_engine_tokens() {
+        assert_eq!(key_token(egui::Key::S).as_deref(), Some("s"));
+        assert_eq!(key_token(egui::Key::Num5).as_deref(), Some("5"));
+        assert_eq!(key_token(egui::Key::Colon).as_deref(), Some(";"));
+        assert_eq!(key_token(egui::Key::Semicolon).as_deref(), Some(";"));
+        assert_eq!(key_token(egui::Key::Escape), None);
     }
 }
