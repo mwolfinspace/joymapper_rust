@@ -240,21 +240,54 @@ fn simulate_key(vk: u16, key_up: bool) {
     }
 }
 
+/// Send key-down events for one combo string ("ctrl+c") in order.
+fn press_key_combo(key_str: &str, key_press_counter: &AtomicU64) {
+    for part in key_str.split('+') {
+        if let Some(vk) = parse_key_string(part) {
+            simulate_key(vk, false);
+            key_press_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Send key-up events for one combo string, in reverse order of the key-downs.
+fn release_key_combo(key_str: &str) {
+    for part in key_str.split('+').rev() {
+        if let Some(vk) = parse_key_string(part) {
+            simulate_key(vk, true);
+        }
+    }
+}
+
 /// Send key-up events for every key an input maps to, in reverse order (mirrors
-/// the key-down ordering used on press). Used both on normal release and when
-/// the app is paused while a button is still held.
+/// the key-down ordering used on press). Used as a safety net when the app is
+/// paused while a button is still held: releasing keys that are not down is
+/// harmless and guarantees nothing gets stuck.
 fn release_mapped_keys(keys_vec: Option<&Vec<String>>) {
     let Some(keys_vec) = keys_vec else { return };
     for key_str in keys_vec.iter().rev() {
         if key_str.is_empty() {
             continue;
         }
-        for part in key_str.split('+').rev() {
-            if let Some(vk) = parse_key_string(part) {
-                simulate_key(vk, true);
-            }
+        release_key_combo(key_str);
+    }
+}
+
+/// Pick the next non-empty loop step for an input and advance the loop cursor.
+/// Empty steps are skipped so a blank column never produces "dead" presses.
+fn next_loop_key(keys_vec: &[String], next_index: &mut usize) -> Option<String> {
+    if keys_vec.is_empty() {
+        return None;
+    }
+    for _ in 0..keys_vec.len() {
+        let idx = *next_index % keys_vec.len();
+        *next_index = (idx + 1) % keys_vec.len();
+        let key_str = &keys_vec[idx];
+        if !key_str.trim().is_empty() {
+            return Some(key_str.clone());
         }
     }
+    None
 }
 
 fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) {
@@ -525,6 +558,16 @@ fn input_display_name(raw: &str) -> String {
         .replace("LS_", "Left stick ")
         .replace("RS_", "Right stick ")
         .replace('_', " ")
+}
+
+/// Shared column geometry for the mapping table so the header and every row
+/// line up: Input (centered), Mapped keys (left), Action (right).
+fn mapping_columns(ui: &egui::Ui) -> (f32, f32) {
+    const INPUT_COL_W: f32 = 140.0;
+    const ACTION_COL_W: f32 = 212.0;
+    let spacing = ui.spacing().item_spacing.x;
+    let keys_w = (ui.available_width() - INPUT_COL_W - ACTION_COL_W - spacing * 2.0).max(180.0);
+    (INPUT_COL_W, keys_w)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2188,6 +2231,7 @@ impl eframe::App for JoyMapperApp {
                         ui.add_space(10.0);
                         let mut needs_save = false;
                         let mut recording_click: Option<(String, usize)> = None;
+                        let mut remove_step: Option<(String, usize)> = None;
 
                         let pressed_mask: Vec<bool> = {
                             let lock = self.state.pressed_inputs.lock().unwrap();
@@ -2197,16 +2241,42 @@ impl eframe::App for JoyMapperApp {
                         let recording_slot = self.state.recording_slot;
 
                         win11_card_frame(&colors).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add_sized([150.0, 20.0], egui::Label::new(egui::RichText::new("Input").small().color(colors.muted)));
-                                ui.label(egui::RichText::new("Mapped keys").small().color(colors.muted));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(egui::RichText::new("Action").small().color(colors.muted));
+                            // Table header
+                            egui::Frame::none()
+                                .fill(colors.surface_alt)
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(8.0, 7.0))
+                                .show(ui, |ui| {
+                                    let (input_w, keys_w) = mapping_columns(ui);
+                                    let spacing = ui.spacing().item_spacing.x;
+                                    ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(input_w, 18.0),
+                                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                            |ui| {
+                                                ui.label(egui::RichText::new("Input").small().strong().color(colors.muted));
+                                            },
+                                        );
+                                        ui.add_space(spacing);
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(keys_w, 18.0),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Mapped keys  (cycles 1 → 2 → 3 per press)")
+                                                        .small()
+                                                        .strong()
+                                                        .color(colors.muted),
+                                                );
+                                            },
+                                        );
+                                        ui.add_space(spacing);
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(egui::RichText::new("Action").small().strong().color(colors.muted));
+                                        });
+                                    });
                                 });
-                            });
-                            ui.add_space(4.0);
-                            ui.separator();
-                            ui.add_space(2.0);
+                            ui.add_space(6.0);
 
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
@@ -2226,11 +2296,19 @@ impl eframe::App for JoyMapperApp {
                                             .rounding(egui::Rounding::same(6.0))
                                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                             .show(ui, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.allocate_ui(egui::vec2(150.0, 30.0), |ui| {
-                                                        let text_color = if is_pressed { colors.accent } else { colors.text };
-                                                        ui.label(egui::RichText::new(input_display_name(input_name)).strong().color(text_color));
-                                                    });
+                                                let (input_w, keys_w) = mapping_columns(ui);
+                                                let spacing = ui.spacing().item_spacing.x;
+                                                ui.horizontal_top(|ui| {
+                                                    // Input column: centered
+                                                    ui.allocate_ui_with_layout(
+                                                        egui::vec2(input_w, 30.0),
+                                                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                                        |ui| {
+                                                            let text_color = if is_pressed { colors.accent } else { colors.text };
+                                                            ui.label(egui::RichText::new(input_display_name(input_name)).strong().color(text_color));
+                                                        },
+                                                    );
+                                                    ui.add_space(spacing);
 
                                                     let key_slots = self.state.profiles.get_mut(&self.state.current_profile_name)
                                                         .unwrap()
@@ -2238,12 +2316,16 @@ impl eframe::App for JoyMapperApp {
                                                         .get_mut(*input_name)
                                                         .unwrap();
 
-                                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true), |ui| {
-                                                        let slots_count = key_slots.len();
-
-                                                        for idx in 0..slots_count {
+                                                    // Mapped keys column: left aligned, wraps inside the column
+                                                    ui.allocate_ui_with_layout(
+                                                        egui::vec2(keys_w, 30.0),
+                                                        egui::Layout::left_to_right(egui::Align::Center),
+                                                        |ui| {
+                                                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                        for idx in 0..key_slots.len() {
                                                             let current_val = &key_slots[idx];
-                                                            let display = get_display_name(current_val);
+                                                            let display = format!("{}  {}", idx + 1, get_display_name(current_val));
                                                             let is_recording = recording_name.as_deref() == Some(*input_name) && recording_slot == Some(idx);
                                                             let chip_fill = if is_recording {
                                                                 colors.warning
@@ -2271,13 +2353,19 @@ impl eframe::App for JoyMapperApp {
                                                                 egui::Button::new(egui::RichText::new(display).monospace().color(chip_text))
                                                                     .fill(chip_fill)
                                                                     .stroke(chip_stroke)
-                                                                    .min_size(egui::vec2(56.0, 28.0)),
+                                                                    .min_size(egui::vec2(78.0, 30.0)),
                                                             );
 
                                                             if cell_btn.clicked() {
                                                                 recording_click = Some((input_name.to_string(), idx));
                                                                 ctx.request_repaint();
                                                             }
+
+                                                            let cell_btn = cell_btn.on_hover_text(format!(
+                                                                "Loop step {}: fires on press {} of the cycle\nClick to record a key or combo",
+                                                                idx + 1,
+                                                                idx + 1
+                                                            ));
 
                                                             cell_btn.context_menu(|ui| {
                                                                 ui.set_min_width(220.0);
@@ -2405,29 +2493,41 @@ impl eframe::App for JoyMapperApp {
                                                                 });
 
                                                                 ui.separator();
-                                                                if ui.button("Clear slot").clicked() {
+                                                                if ui.button("Clear loop key").clicked() {
                                                                     key_slots[idx] = "".to_string();
                                                                     needs_save = true;
                                                                     ui.close_menu();
                                                                 }
+                                                                if key_slots.len() > 1 && ui.button("Remove loop key").clicked() {
+                                                                    remove_step = Some((input_name.to_string(), idx));
+                                                                    ui.close_menu();
+                                                                }
                                                             });
                                                         }
+                                                        });
+                                                        },
+                                                    );
+                                                    ui.add_space(spacing);
 
-                                                        if slots_count < 10
-                                                            && ui
-                                                                .add(egui::Button::new("+").fill(colors.surface_alt).min_size(egui::vec2(30.0, 28.0)))
-                                                                .on_hover_text("Add simultaneous key slot")
-                                                                .clicked()
-                                                            {
-                                                                key_slots.push("".to_string());
-                                                                needs_save = true;
-                                                            }
-                                                    });
-
+                                                    // Action column: right aligned
                                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                         if ui
-                                                            .add(egui::Button::new("Reset").fill(colors.surface_alt).min_size(egui::vec2(64.0, 28.0)))
-                                                            .on_hover_text("Reset to a single unmapped slot")
+                                                            .add_enabled(
+                                                                key_slots.len() < 10,
+                                                                egui::Button::new("New Loop keys")
+                                                                    .fill(colors.surface_alt)
+                                                                    .min_size(egui::vec2(120.0, 30.0)),
+                                                            )
+                                                            .on_hover_text("Add another mapped-key step to this input's press cycle (max 10)")
+                                                            .on_disabled_hover_text("Already at the 10-step limit")
+                                                            .clicked()
+                                                        {
+                                                            key_slots.push("".to_string());
+                                                            needs_save = true;
+                                                        }
+                                                        if ui
+                                                            .add(egui::Button::new("Reset").fill(colors.surface_alt).min_size(egui::vec2(62.0, 30.0)))
+                                                            .on_hover_text("Reset to a single unmapped loop step")
                                                             .clicked()
                                                         {
                                                             key_slots.clear();
@@ -2441,6 +2541,22 @@ impl eframe::App for JoyMapperApp {
                                     }
                                 });
                         });
+
+                        if let Some((name, slot)) = remove_step {
+                            if let Some(keys_vec) = self
+                                .state
+                                .profiles
+                                .get_mut(&self.state.current_profile_name)
+                                .unwrap()
+                                .mappings
+                                .get_mut(&name)
+                            {
+                                if keys_vec.len() > 1 && slot < keys_vec.len() {
+                                    keys_vec.remove(slot);
+                                    needs_save = true;
+                                }
+                            }
+                        }
 
                         if let Some((name, slot)) = recording_click {
                             self.state.recording_key = Some(name);
@@ -2557,6 +2673,11 @@ fn start_hardware_threads(
         let mut last_tray_update = std::time::Instant::now();
         let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
         let mut was_paused = false;
+        // Per-input loop cursor: which mapped-key step the next press fires.
+        let mut loop_indices: HashMap<String, usize> = HashMap::new();
+        // The combo actually pressed for each held input, so release only sends
+        // key-ups for keys we sent key-downs for.
+        let mut held_combos: HashMap<String, String> = HashMap::new();
         loop {
             let (connected, buttons, lx, ly, rx, ry, lt, rt) = check_controller_full(0);
 
@@ -2650,6 +2771,7 @@ fn start_hardware_threads(
                         .filter(|(_, pressed)| **pressed)
                         .map(|(name, _)| name.clone())
                         .collect();
+                    held_combos.clear();
                     if !held.is_empty() {
                         for name in &held {
                             release_mapped_keys(macro_map.get(name));
@@ -2682,15 +2804,12 @@ fn start_hardware_threads(
                     if *is_pressed && !was_pressed {
                         if simulate {
                             if let Some(keys_vec) = macro_map.get(name) {
-                                for key_str in keys_vec {
-                                    if !key_str.is_empty() {
-                                        for part in key_str.split('+') {
-                                            if let Some(vk) = parse_key_string(part) {
-                                                simulate_key(vk, false);
-                                                key_press_counter.fetch_add(1, Ordering::Relaxed);
-                                            }
-                                        }
-                                    }
+                                // Each new press advances the loop: press 1 fires
+                                // mapped keys 1, press 2 fires mapped keys 2, ...
+                                let next = loop_indices.entry(name.clone()).or_insert(0);
+                                if let Some(combo) = next_loop_key(keys_vec, next) {
+                                    press_key_combo(&combo, &key_press_counter);
+                                    held_combos.insert(name.clone(), combo);
                                 }
                             }
                             if sound_enabled.load(Ordering::SeqCst) {
@@ -2701,8 +2820,12 @@ fn start_hardware_threads(
                         }
                         state_changed = true;
                     } else if !*is_pressed && was_pressed {
-                        if simulate {
-                            release_mapped_keys(macro_map.get(name));
+                        // Release exactly the step that this press fired. Drop the
+                        // bookkeeping even when we no longer own input.
+                        if let Some(combo) = held_combos.remove(name) {
+                            if simulate {
+                                release_key_combo(&combo);
+                            }
                         }
                         state_changed = true;
                     }
