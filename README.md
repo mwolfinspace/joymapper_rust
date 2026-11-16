@@ -15,9 +15,9 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 | Feature | Detail |
 |---|---|
 | 🎮 **Full XInput** | All 24 inputs: A/B/X/Y, D-pad, bumpers, triggers (analog→digital), thumbstick clicks + 4 directions each, Start/Back/Guide |
-| ⌨️ **Loop Key Cycles** | Give an input up to **10 loop steps**. Each press fires the next step and wraps around: steps `L` → `O` produce `LOLOLO...`. Each step can still be a combo like `ctrl+shift+esc` |
+| ⌨️ **Loop Key Cycles** | Give an input up to **10 loop steps**. Each press fires the next step and wraps around: steps `L` → `O` produce `LOLOLO...`. Every step is a colour-coded pill (`1` blue, `2` green, `3` yellow, `4` red, `5` purple) and a whole combo such as `Ctrl + Shift + S` stays in **one** pill/step |
 | 🔢 **Numpad Support** | Distinct VK_NUMPAD0–9, VK_ADD/SUBTRACT/MULTIPLY/DIVIDE/DECIMAL — games and DAWs see real numpad keystrokes |
-| 📝 **Live Recording** | Click any key cell, press the keyboard combo you want — instant assign. Records to the **exact loop step** clicked. Escape cancels. |
+| 📝 **Live Recording** | Click any pill, press the keyboard combo you want — instant assign to that **one loop step**. Escape cancels. |
 | 🖱️ **Categorized Context Menus** | Right-click any cell for: Letters A–M, Letters N–Z, Numbers 0–9, Symbols & Brackets, Modifiers & Controls, Function Keys |
 | 📂 **Per-Profile Files** | Each profile = one `.json` file in the exe directory. Copy, share, or edit them directly. No AppData, no registry bloat. |
 | 🔄 **Profile Management** | Switch, New, Rename, Delete, Import, Export — all self-contained in the exe folder |
@@ -73,10 +73,12 @@ Just unzip and run `joymapper_rust.exe` — no installer needed.
 1. **Launch the app** — by default it starts minimized to the system tray (lightweight `--tray` mode, ~2 MB RAM). Right-click the tray icon → *Show Mapper* or left-click to open the full UI.
 2. **Plug in an XInput controller** — the status indicator in the status bar turns green
 3. **Map your buttons**:
-   - **Click a key cell** → the cell turns amber with a gold border → press the desired keyboard keys → instantly assigned to that loop step ✨
-   - **Right-click** any cell for the **categorized context menu** (Letters, Numbers, Symbols, Modifiers, F-Keys)
+   - **Click a pill** → it turns amber → press the desired key or combo → instantly assigned to that loop step ✨
+   - **Right-click** any pill for the **categorized context menu** (Letters, Numbers, Symbols, Modifiers, F-Keys)
    - Click **New Loop keys** in the Action column to add another loop step (up to 10 per input). Each new press of the controller button fires the next step: `1 → 2 → 3 → 1 → …`
    - Click **Reset** to reset the input to a single empty loop step
+
+   **Pills:** the numbered circle shows the loop order. Colours follow `1` blue, `2` green, `3` yellow, `4` red, `5` purple, then repeat. A pill holds either one key (`L`) or a whole combo (`Ctrl + Shift + S`); a combo is always **one** step, never split into `1`/`2`.
 
    **Loop example:** map `A` to step 1 = `l` and step 2 = `o`. Pressing A repeatedly types `LOLOLO…`.
 4. **Switch profiles** via the dropdown in the toolbar
@@ -192,7 +194,8 @@ Each input can hold **up to 10 loop steps** in an array. Every new press of the 
 }
 ```
 
-With `"A": ["l", "o"]`, repeatedly pressing A types `lololo…`. A step can also be a combo, e.g. `"X": ["ctrl+c", "ctrl+v"]`.
+With `"A": ["l", "o"]`, repeatedly pressing A types `lololo…`. A step can also be a combo, e.g. `"X": ["ctrl+c", "ctrl+v"]` — each combo is one pill and one press.
+Legacy profiles that stored a combo as simultaneous entries (`["ctrl", "s"]`) are collapsed to `["ctrl+s"]` on load, so combos never become two loop steps.
 
 - The `last_used` flag tracks the most recently active profile across sessions
 - Arrays with a single string are cleanly backward-compatible with old single-string profiles (auto-migrated on load)

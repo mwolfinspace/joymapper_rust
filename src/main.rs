@@ -480,6 +480,31 @@ fn default_mapping_vec() -> Vec<String> {
     vec!["".to_string()]
 }
 
+fn is_modifier_token(token: &str) -> bool {
+    matches!(
+        token.trim().to_lowercase().as_str(),
+        "ctrl" | "shift" | "alt" | "win"
+    )
+}
+
+/// Older builds stored a combo as several simultaneous array entries, e.g.
+/// `["ctrl", "s"]`. Collapse those groups into one `"ctrl+s"` step so a combo
+/// is always a single loop step. Real loops such as `["l", "o"]` are left
+/// untouched because they contain no bare modifier.
+fn normalize_legacy_combos(mappings: &mut HashMap<String, Vec<String>>) {
+    for keys in mappings.values_mut() {
+        if keys.len() > 1 && keys.iter().any(|k| is_modifier_token(k)) {
+            let combined = keys
+                .iter()
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty())
+                .collect::<Vec<_>>()
+                .join("+");
+            *keys = vec![combined];
+        }
+    }
+}
+
 struct Win11Colors {
     app_bg: Color32,
     surface: Color32,
@@ -490,11 +515,9 @@ struct Win11Colors {
     text: Color32,
     muted: Color32,
     accent: Color32,
-    accent_soft: Color32,
     success: Color32,
     danger: Color32,
     warning: Color32,
-    empty_chip: Color32,
 }
 
 fn win11_colors(is_dark: bool) -> Win11Colors {
@@ -509,11 +532,9 @@ fn win11_colors(is_dark: bool) -> Win11Colors {
             text: Color32::from_rgb(243, 243, 243),
             muted: Color32::from_rgb(178, 178, 178),
             accent: Color32::from_rgb(0, 120, 212),
-            accent_soft: Color32::from_rgba_unmultiplied(0, 120, 212, 48),
             success: Color32::from_rgb(108, 203, 95),
             danger: Color32::from_rgb(255, 99, 88),
             warning: Color32::from_rgb(255, 185, 0),
-            empty_chip: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
         }
     } else {
         Win11Colors {
@@ -526,11 +547,9 @@ fn win11_colors(is_dark: bool) -> Win11Colors {
             text: Color32::from_rgb(32, 32, 32),
             muted: Color32::from_rgb(96, 96, 96),
             accent: Color32::from_rgb(0, 103, 192),
-            accent_soft: Color32::from_rgba_unmultiplied(0, 103, 192, 26),
             success: Color32::from_rgb(16, 124, 16),
             danger: Color32::from_rgb(196, 43, 28),
             warning: Color32::from_rgb(157, 93, 0),
-            empty_chip: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
         }
     }
 }
@@ -563,11 +582,174 @@ fn input_display_name(raw: &str) -> String {
 /// Shared column geometry for the mapping table so the header and every row
 /// line up: Input (centered), Mapped keys (left), Action (right).
 fn mapping_columns(ui: &egui::Ui) -> (f32, f32) {
-    const INPUT_COL_W: f32 = 140.0;
-    const ACTION_COL_W: f32 = 212.0;
+    const INPUT_COL_W: f32 = 120.0;
+    const ACTION_COL_W: f32 = 204.0;
     let spacing = ui.spacing().item_spacing.x;
-    let keys_w = (ui.available_width() - INPUT_COL_W - ACTION_COL_W - spacing * 2.0).max(180.0);
+    let keys_w =
+        (ui.available_width() - INPUT_COL_W - ACTION_COL_W - spacing * 4.0).max(170.0);
     (INPUT_COL_W, keys_w)
+}
+
+/// Colour code for a loop step. Steps 1-5 are blue, green, yellow, red and
+/// purple; later steps repeat the palette (the number badge keeps them apart).
+fn loop_step_color(step: usize) -> Color32 {
+    const PALETTE: [Color32; 5] = [
+        Color32::from_rgb(0, 145, 220),   // 1 blue
+        Color32::from_rgb(38, 172, 92),   // 2 green
+        Color32::from_rgb(230, 166, 0),   // 3 yellow
+        Color32::from_rgb(224, 76, 76),   // 4 red
+        Color32::from_rgb(150, 90, 214),  // 5 purple
+    ];
+    PALETTE[step % PALETTE.len()]
+}
+
+fn contrast_text(color: Color32) -> Color32 {
+    let luma =
+        0.299 * color.r() as f32 + 0.587 * color.g() as f32 + 0.114 * color.b() as f32;
+    if luma > 165.0 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// Human-readable name for one part of a mapping token.
+fn pretty_key_name(raw: &str) -> String {
+    match raw.to_lowercase().as_str() {
+        "" => "None".to_string(),
+        "ctrl" => "Ctrl".to_string(),
+        "shift" => "Shift".to_string(),
+        "alt" => "Alt".to_string(),
+        "win" => "Win".to_string(),
+        "space" => "Space".to_string(),
+        "enter" => "Enter".to_string(),
+        "escape" => "Esc".to_string(),
+        "tab" => "Tab".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "caps" => "Caps".to_string(),
+        "insert" => "Insert".to_string(),
+        "delete" => "Del".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
+        "pgup" => "PgUp".to_string(),
+        "pgdown" => "PgDn".to_string(),
+        "arrowup" => "Up".to_string(),
+        "arrowdown" => "Down".to_string(),
+        "arrowleft" => "Left".to_string(),
+        "arrowright" => "Right".to_string(),
+        "num_enter" => "Num Enter".to_string(),
+        other => {
+            if let Some(rest) = other.strip_prefix("num") {
+                if rest.len() == 1 && rest.chars().all(|c| c.is_ascii_digit()) {
+                    return format!("Num {}", rest);
+                }
+            }
+            get_display_name(other)
+        }
+    }
+}
+
+/// Render a combo or single key as "Ctrl + Shift + S" / "L".
+fn format_key_combo(raw: &str) -> String {
+    if raw.is_empty() {
+        return "None".to_string();
+    }
+    raw.split('+')
+        .map(|part| pretty_key_name(part.trim()))
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
+/// Draw a small coloured circle with a step number (used in the table header).
+fn step_badge(ui: &mut egui::Ui, step: usize, diameter: f32) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+    let color = loop_step_color(step.saturating_sub(1));
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), diameter * 0.5, color);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        step.to_string(),
+        egui::FontId::proportional(diameter * 0.62),
+        contrast_text(color),
+    );
+}
+
+/// One loop-step pill: a rounded key chip containing a coloured circle with
+/// the step number followed by the mapped key/combo label. A whole combo is
+/// one pill and therefore one loop step.
+fn loop_pill(
+    ui: &mut egui::Ui,
+    step: usize,
+    label: &str,
+    is_recording: bool,
+    is_empty: bool,
+    colors: &Win11Colors,
+) -> egui::Response {
+    let color = loop_step_color(step.saturating_sub(1));
+    let text_color = if is_recording {
+        Color32::BLACK
+    } else if is_empty {
+        colors.muted
+    } else {
+        colors.text
+    };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::monospace(12.0),
+        text_color,
+    );
+
+    let badge_d = 18.0;
+    let pad_x = 7.0;
+    let gap = 7.0;
+    let height = 26.0;
+    let width = pad_x * 2.0 + badge_d + gap + galley.size().x;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let fill = if is_recording {
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 90)
+        } else if is_empty {
+            colors.surface_alt
+        } else if hovered {
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 68)
+        } else {
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40)
+        };
+        let stroke_color = if is_recording {
+            colors.warning
+        } else if is_empty {
+            colors.border
+        } else {
+            color
+        };
+        let stroke = egui::Stroke::new(if is_recording { 2.0_f32 } else { 1.0_f32 }, stroke_color);
+
+        let painter = ui.painter();
+        painter.rect(rect, egui::Rounding::same(height * 0.5), fill, stroke);
+
+        let badge_center = egui::pos2(rect.left() + pad_x + badge_d * 0.5, rect.center().y);
+        painter.circle_filled(badge_center, badge_d * 0.5, color);
+        painter.text(
+            badge_center,
+            egui::Align2::CENTER_CENTER,
+            step.to_string(),
+            egui::FontId::proportional(11.0),
+            contrast_text(color),
+        );
+
+        let text_pos = egui::pos2(
+            rect.left() + pad_x + badge_d + gap,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        painter.galley(text_pos, galley, text_color);
+    }
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -905,7 +1087,8 @@ fn load_active_profile_mapping() -> (String, HashMap<String, Vec<String>>) {
                 }
                 let parsed = serde_json::from_str::<Profile>(&data)
                     .or_else(|_| serde_json::from_str::<OldProfile>(&data).map(Profile::from));
-                if let Ok(profile) = parsed {
+                if let Ok(mut profile) = parsed {
+                    normalize_legacy_combos(&mut profile.mappings);
                     profiles.insert(name, profile);
                 }
             }
@@ -2145,7 +2328,8 @@ impl eframe::App for JoyMapperApp {
                                         if let Some(content) = read_json_file(&path) {
                                             let profile = serde_json::from_str::<Profile>(&content)
                                                 .or_else(|_| serde_json::from_str::<OldProfile>(&content).map(Profile::from));
-                                            if let Ok(profile) = profile {
+                                            if let Ok(mut profile) = profile {
+                                                normalize_legacy_combos(&mut profile.mappings);
                                                 let stem = path.file_stem().unwrap().to_string_lossy().to_string();
                                                 let dest = profiles_dir().join(format!("{}.json", stem));
                                                 let _ = std::fs::copy(&path, &dest);
@@ -2245,13 +2429,13 @@ impl eframe::App for JoyMapperApp {
                             egui::Frame::none()
                                 .fill(colors.surface_alt)
                                 .rounding(egui::Rounding::same(6.0))
-                                .inner_margin(egui::Margin::symmetric(8.0, 7.0))
+                                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
                                     let (input_w, keys_w) = mapping_columns(ui);
                                     let spacing = ui.spacing().item_spacing.x;
                                     ui.horizontal(|ui| {
                                         ui.allocate_ui_with_layout(
-                                            egui::vec2(input_w, 18.0),
+                                            egui::vec2(input_w, 22.0),
                                             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                                             |ui| {
                                                 ui.label(egui::RichText::new("Input").small().strong().color(colors.muted));
@@ -2259,13 +2443,35 @@ impl eframe::App for JoyMapperApp {
                                         );
                                         ui.add_space(spacing);
                                         ui.allocate_ui_with_layout(
-                                            egui::vec2(keys_w, 18.0),
+                                            egui::vec2(keys_w, 22.0),
                                             egui::Layout::left_to_right(egui::Align::Center),
                                             |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new("Mapped keys")
+                                                            .small()
+                                                            .strong()
+                                                            .color(colors.muted),
+                                                    )
+                                                    .wrap(false),
+                                                )
+                                                .on_hover_text(
+                                                    "Each press fires the next loop step. Click a pill to record a single key or a combo such as Ctrl + S.",
+                                                );
+                                                ui.add_space(10.0);
+                                                for step in 1..=5 {
+                                                    if step > 1 {
+                                                        ui.label(
+                                                            egui::RichText::new(">")
+                                                                .small()
+                                                                .color(colors.muted),
+                                                        );
+                                                    }
+                                                    step_badge(ui, step, 17.0);
+                                                }
                                                 ui.label(
-                                                    egui::RichText::new("Mapped keys  (cycles 1 → 2 → 3 per press)")
+                                                    egui::RichText::new("…")
                                                         .small()
-                                                        .strong()
                                                         .color(colors.muted),
                                                 );
                                             },
@@ -2294,14 +2500,14 @@ impl eframe::App for JoyMapperApp {
                                         egui::Frame::none()
                                             .fill(row_fill)
                                             .rounding(egui::Rounding::same(6.0))
-                                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                                             .show(ui, |ui| {
                                                 let (input_w, keys_w) = mapping_columns(ui);
                                                 let spacing = ui.spacing().item_spacing.x;
                                                 ui.horizontal_top(|ui| {
                                                     // Input column: centered
                                                     ui.allocate_ui_with_layout(
-                                                        egui::vec2(input_w, 30.0),
+                                                        egui::vec2(input_w, 26.0),
                                                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                                                         |ui| {
                                                             let text_color = if is_pressed { colors.accent } else { colors.text };
@@ -2318,42 +2524,22 @@ impl eframe::App for JoyMapperApp {
 
                                                     // Mapped keys column: left aligned, wraps inside the column
                                                     ui.allocate_ui_with_layout(
-                                                        egui::vec2(keys_w, 30.0),
+                                                        egui::vec2(keys_w, 26.0),
                                                         egui::Layout::left_to_right(egui::Align::Center),
                                                         |ui| {
                                                         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                                                         ui.horizontal_wrapped(|ui| {
                                                         for idx in 0..key_slots.len() {
                                                             let current_val = &key_slots[idx];
-                                                            let display = format!("{}  {}", idx + 1, get_display_name(current_val));
+                                                            let display = format_key_combo(current_val);
                                                             let is_recording = recording_name.as_deref() == Some(*input_name) && recording_slot == Some(idx);
-                                                            let chip_fill = if is_recording {
-                                                                colors.warning
-                                                            } else if current_val.is_empty() {
-                                                                colors.empty_chip
-                                                            } else {
-                                                                colors.accent_soft
-                                                            };
-                                                            let chip_text = if is_recording {
-                                                                Color32::BLACK
-                                                            } else if current_val.is_empty() {
-                                                                colors.muted
-                                                            } else {
-                                                                colors.text
-                                                            };
-                                                            let chip_stroke = if is_recording {
-                                                                egui::Stroke::new(1.5_f32, colors.warning)
-                                                            } else if current_val.is_empty() {
-                                                                egui::Stroke::new(1.0_f32, colors.border)
-                                                            } else {
-                                                                egui::Stroke::new(1.0_f32, colors.accent)
-                                                            };
-
-                                                            let cell_btn = ui.add(
-                                                                egui::Button::new(egui::RichText::new(display).monospace().color(chip_text))
-                                                                    .fill(chip_fill)
-                                                                    .stroke(chip_stroke)
-                                                                    .min_size(egui::vec2(78.0, 30.0)),
+                                                            let cell_btn = loop_pill(
+                                                                ui,
+                                                                idx + 1,
+                                                                &display,
+                                                                is_recording,
+                                                                current_val.is_empty(),
+                                                                &colors,
                                                             );
 
                                                             if cell_btn.clicked() {
@@ -2362,8 +2548,7 @@ impl eframe::App for JoyMapperApp {
                                                             }
 
                                                             let cell_btn = cell_btn.on_hover_text(format!(
-                                                                "Loop step {}: fires on press {} of the cycle\nClick to record a key or combo",
-                                                                idx + 1,
+                                                                "Loop step {} — click to record a single key or a combo (e.g. Ctrl + S).\nA combo stays in this one step.",
                                                                 idx + 1
                                                             ));
 
@@ -2516,7 +2701,7 @@ impl eframe::App for JoyMapperApp {
                                                                 key_slots.len() < 10,
                                                                 egui::Button::new("New Loop keys")
                                                                     .fill(colors.surface_alt)
-                                                                    .min_size(egui::vec2(120.0, 30.0)),
+                                                                    .min_size(egui::vec2(112.0, 26.0)),
                                                             )
                                                             .on_hover_text("Add another mapped-key step to this input's press cycle (max 10)")
                                                             .on_disabled_hover_text("Already at the 10-step limit")
@@ -2526,7 +2711,7 @@ impl eframe::App for JoyMapperApp {
                                                             needs_save = true;
                                                         }
                                                         if ui
-                                                            .add(egui::Button::new("Reset").fill(colors.surface_alt).min_size(egui::vec2(62.0, 30.0)))
+                                                            .add(egui::Button::new("Reset").fill(colors.surface_alt).min_size(egui::vec2(58.0, 26.0)))
                                                             .on_hover_text("Reset to a single unmapped loop step")
                                                             .clicked()
                                                         {
@@ -2890,8 +3075,9 @@ fn load_profiles() -> (HashMap<String, Profile>, String) {
                     continue;
                 }
                 if let Some(data) = read_json_file(&path) {
-                    if let Ok(profile) = serde_json::from_str::<Profile>(&data) {
+                    if let Ok(mut profile) = serde_json::from_str::<Profile>(&data) {
                         let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                        normalize_legacy_combos(&mut profile.mappings);
                         profiles.insert(name, profile);
                     } else if let Ok(old) = serde_json::from_str::<OldProfile>(&data) {
                         let name = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -3218,4 +3404,45 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Box::new(JoyMapperApp::new(cc))),
     )
+}
+
+#[cfg(test)]
+mod loop_key_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_combo_entries_collapse_to_one_step() {
+        let mut mappings = HashMap::new();
+        mappings.insert("A".to_string(), vec!["ctrl".into(), "s".into()]);
+        mappings.insert("B".to_string(), vec!["shift".into(), "alt".into(), "f5".into()]);
+        normalize_legacy_combos(&mut mappings);
+        assert_eq!(mappings["A"], vec!["ctrl+s".to_string()]);
+        assert_eq!(mappings["B"], vec!["shift+alt+f5".to_string()]);
+    }
+
+    #[test]
+    fn real_loops_are_not_merged() {
+        let mut mappings = HashMap::new();
+        mappings.insert("A".to_string(), vec!["l".into(), "o".into()]);
+        mappings.insert("X".to_string(), vec!["ctrl+c".into(), "ctrl+v".into()]);
+        normalize_legacy_combos(&mut mappings);
+        assert_eq!(mappings["A"], vec!["l".to_string(), "o".to_string()]);
+        assert_eq!(mappings["X"], vec!["ctrl+c".to_string(), "ctrl+v".to_string()]);
+    }
+
+    #[test]
+    fn loop_advances_and_skips_empty_steps() {
+        let steps = vec!["l".to_string(), String::new(), "o".to_string()];
+        let mut index = 0;
+        assert_eq!(next_loop_key(&steps, &mut index).as_deref(), Some("l"));
+        assert_eq!(next_loop_key(&steps, &mut index).as_deref(), Some("o"));
+        assert_eq!(next_loop_key(&steps, &mut index).as_deref(), Some("l"));
+    }
+
+    #[test]
+    fn combo_is_displayed_as_one_pill() {
+        assert_eq!(format_key_combo("l"), "L");
+        assert_eq!(format_key_combo("ctrl+s"), "Ctrl + S");
+        assert_eq!(format_key_combo("shift+alt+f5"), "Shift + Alt + F5");
+    }
 }
