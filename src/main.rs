@@ -2043,15 +2043,15 @@ impl JoyMapperApp {
             }
 
             let mut paused = PAUSED.load(Ordering::SeqCst);
-            if ui.checkbox(&mut paused, "Pause mapping").changed() {
-                set_paused(paused);
-            }
-            ui.label(
-                egui::RichText::new(
+            if ui
+                .checkbox(&mut paused, "Pause mapping")
+                .on_hover_text(
                     "Stops simulating keys completely; controller input still reaches other programs. Pausing does not close the app.",
                 )
-                .color(colors.muted),
-            );
+                .changed()
+            {
+                set_paused(paused);
+            }
             ui.add_space(6.0);
             if ui
                 .checkbox(&mut self.state.run_at_startup, "Start with Windows")
@@ -2270,9 +2270,13 @@ impl JoyMapperApp {
         style.spacing.menu_margin = egui::Margin::same(8.0);
         style.spacing.indent = 16.0;
 
-        // Windows 11 accent — blue highlight
+        // Windows 11 accent — blue highlight. The highlight uses white text (the
+        // same pairing as the selected tab); `selection.stroke` drives the text
+        // colour of selected items, so a zero-width stroke keeps the pill border
+        // out while making the label readable on the accent fill.
         let colors = win11_colors(is_dark);
         style.visuals.selection.bg_fill = colors.accent;
+        style.visuals.selection.stroke = egui::Stroke::new(0.0, Color32::WHITE);
         style.visuals.hyperlink_color = colors.accent;
         style.visuals.widgets.hovered.bg_fill = if is_dark {
             Color32::from_rgba_unmultiplied(255, 255, 255, 20)
@@ -2622,7 +2626,15 @@ impl eframe::App for JoyMapperApp {
                             // One fixed row: the profile bar must never wrap onto a
                             // second line, even with a long profile name. The combo
                             // gets a bounded width instead of growing with its text.
-                            ui.horizontal(|ui| {
+                            // The row starts at the full 26 px control height. If it
+                            // starts at the default text height instead, the label is
+                            // laid out before any button grows the row and ends up
+                            // sitting higher than the combo beside it.
+                            let toolbar_w = ui.available_width();
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(toolbar_w, 26.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
                                 ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
                                 ui.label(egui::RichText::new("Profile").color(colors.muted));
