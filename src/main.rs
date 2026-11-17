@@ -599,6 +599,47 @@ fn default_mapping_vec() -> Vec<String> {
     vec!["".to_string()]
 }
 
+/// A mapping step can also drive the app itself: switch the active profile
+/// instead of sending a keystroke. These tokens live in the same profile JSON
+/// as ordinary keys, e.g. `"@profile:Gaming"` or `"@profile_next"`.
+const PROFILE_STEP_PREFIX: &str = "@profile:";
+const PROFILE_STEP_NEXT: &str = "@profile_next";
+
+#[derive(Clone, PartialEq, Debug)]
+enum ProfileStep {
+    Switch(String),
+    Next,
+}
+
+fn profile_step(raw: &str) -> Option<ProfileStep> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case(PROFILE_STEP_NEXT) {
+        return Some(ProfileStep::Next);
+    }
+    trimmed
+        .strip_prefix(PROFILE_STEP_PREFIX)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| ProfileStep::Switch(name.to_string()))
+}
+
+/// Human-readable label for a profile-switch step, or `None` for a key combo.
+fn profile_step_label(raw: &str) -> Option<String> {
+    match profile_step(raw)? {
+        ProfileStep::Switch(name) => Some(format!("Profile: {}", name)),
+        ProfileStep::Next => Some("Next profile".to_string()),
+    }
+}
+
+/// Next name in a sorted profile list, wrapping around at the end.
+fn next_profile_name(names: &[String], current: &str) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let idx = names.iter().position(|n| n == current).unwrap_or(0);
+    Some(names[(idx + 1) % names.len()].clone())
+}
+
 fn is_modifier_token(token: &str) -> bool {
     matches!(
         token.trim().to_lowercase().as_str(),
@@ -775,6 +816,9 @@ fn format_key_combo(raw: &str) -> String {
     if raw.is_empty() {
         return "None".to_string();
     }
+    if let Some(label) = profile_step_label(raw) {
+        return label;
+    }
     raw.split('+')
         .map(|part| pretty_key_name(part.trim()))
         .collect::<Vec<_>>()
@@ -897,6 +941,25 @@ struct AppConfig {
     /// automatic check to once per day).
     #[serde(default)]
     last_update_check: u64,
+    /// Last window inner size in points. Saved when a resize settles and on
+    /// exit, so the size survives close-to-tray (which exits the process
+    /// directly, before eframe's own window persistence can run).
+    #[serde(default)]
+    window_size: Option<[f32; 2]>,
+}
+
+/// Content-tight window defaults. The width is sized for the profile toolbar
+/// and mapping table without stretching them across a wide empty window.
+const DEFAULT_WINDOW_WIDTH: f32 = 620.0;
+const DEFAULT_WINDOW_HEIGHT: f32 = 640.0;
+const MIN_WINDOW_WIDTH: f32 = 600.0;
+const MIN_WINDOW_HEIGHT: f32 = 520.0;
+
+fn configured_window_size(config: &AppConfig) -> [f32; 2] {
+    config
+        .window_size
+        .map(|[width, height]| [width.max(MIN_WINDOW_WIDTH), height.max(MIN_WINDOW_HEIGHT)])
+        .unwrap_or([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
 }
 
 fn default_start_minimized() -> bool {
@@ -914,6 +977,7 @@ impl Default for AppConfig {
             paused: false,
             auto_update: default_auto_update(),
             last_update_check: 0,
+            window_size: None,
         }
     }
 }
@@ -954,6 +1018,9 @@ fn save_config(config: &AppConfig) {
 struct AppState {
     profiles: HashMap<String, Profile>,
     current_profile_name: String,
+    /// Shared with the input engine so a "switch profile" mapping step can
+    /// update the active profile and have the window follow along.
+    active_profile_name: Arc<Mutex<String>>,
     active_tab: Tab,
     theme: AppTheme,
     close_to_tray: bool,
@@ -976,6 +1043,10 @@ struct AppState {
     battery_info: Arc<Mutex<(u8, u8)>>,
     auto_update: bool,
     update_state: Arc<Mutex<updater::UpdateState>>,
+    /// Current window inner size and the last size flushed to config.json.
+    window_size: [f32; 2],
+    window_size_saved: [f32; 2],
+    window_size_changed_at: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -983,9 +1054,19 @@ impl AppState {
         profiles_dir().join(format!("{}.json", self.current_profile_name))
     }
 
+    /// Flush the last known window size into config.json. Called when a resize
+    /// settles and from every exit path.
+    fn persist_window_size(&self) {
+        let size = self.window_size;
+        update_config(|cfg| cfg.window_size = Some(size));
+    }
+
     fn save_to_disk(&self) {
         let dir = profiles_dir();
         let current_name = &self.current_profile_name;
+
+        // Keep the input engine's idea of the active profile in sync with the UI.
+        *self.active_profile_name.lock().unwrap() = current_name.clone();
 
         // Save every *other* profile with last_used = false
         for (name, profile) in &self.profiles {
@@ -1237,6 +1318,84 @@ fn load_active_profile_mapping() -> (String, HashMap<String, Vec<String>>) {
             .or_insert_with(default_mapping_vec);
     }
     (name, mappings)
+}
+
+/// Read every profile from disk without creating defaults or writing anything.
+/// Used by the input engine when it needs a fresh view before switching.
+fn read_profiles_from_disk() -> HashMap<String, Profile> {
+    let dir = profiles_dir();
+    let mut profiles = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if name == "config" {
+                continue;
+            }
+            if let Some(data) = read_json_file(&path) {
+                let parsed = serde_json::from_str::<Profile>(&data)
+                    .or_else(|_| serde_json::from_str::<OldProfile>(&data).map(Profile::from));
+                if let Ok(mut profile) = parsed {
+                    normalize_legacy_combos(&mut profile.mappings);
+                    profiles.insert(name, profile);
+                }
+            }
+        }
+    }
+    profiles
+}
+
+/// Execute a profile-switch mapping step: move the `last_used` marker to the
+/// target profile on disk and return its mapping snapshot. `current` is the
+/// profile the engine is switching away from, used for a cycle step.
+fn switch_profile(
+    step: &ProfileStep,
+    current: &str,
+) -> Option<(String, HashMap<String, Vec<String>>)> {
+    let mut profiles = read_profiles_from_disk();
+    if profiles.is_empty() {
+        return None;
+    }
+
+    let mut names: Vec<String> = profiles.keys().cloned().collect();
+    names.sort_by_key(|name| name.to_lowercase());
+
+    let target = match step {
+        ProfileStep::Switch(name) => {
+            if profiles.contains_key(name) {
+                name.clone()
+            } else {
+                names.iter().find(|n| n.eq_ignore_ascii_case(name))?.clone()
+            }
+        }
+        ProfileStep::Next => {
+            let current = if names.iter().any(|n| n == current) {
+                current.to_string()
+            } else {
+                profiles
+                    .iter()
+                    .find(|(_, profile)| profile.last_used)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| names[0].clone())
+            };
+            next_profile_name(&names, &current)?
+        }
+    };
+
+    let dir = profiles_dir();
+    for (name, profile) in profiles.iter_mut() {
+        profile.last_used = name == &target;
+        if let Ok(json) = serde_json::to_string_pretty(profile) {
+            let _ = std::fs::write(dir.join(format!("{}.json", name)), json);
+        }
+    }
+    let mappings = profiles.remove(&target)?.mappings;
+    Some((target, mappings))
 }
 
 fn profiles_stamp() -> Vec<(String, (u64, u64))> {
@@ -1616,6 +1775,7 @@ struct JoyMapperApp {
 
 impl Drop for JoyMapperApp {
     fn drop(&mut self) {
+        self.state.persist_window_size();
         self.state.save_to_disk();
     }
 }
@@ -1647,6 +1807,7 @@ impl JoyMapperApp {
         let sound_enabled = Arc::new(AtomicBool::new(true));
         let sound_engine = SoundEngine::new();
         let click_tx = sound_engine.as_ref().map(|engine| engine.sender());
+        let active_profile_name = Arc::new(Mutex::new(current_profile_name.clone()));
 
         // Keep exactly one tray icon alive next to the window.
         ensure_tray_process();
@@ -1658,6 +1819,7 @@ impl JoyMapperApp {
             pressed_inputs.clone(),
             active_mapping.clone(),
             key_press_counter.clone(),
+            active_profile_name.clone(),
             connection_start.clone(),
             battery_info.clone(),
             click_tx,
@@ -1667,11 +1829,13 @@ impl JoyMapperApp {
 
         let config = load_config();
         let update_state = Arc::new(Mutex::new(updater::UpdateState::Idle));
+        let window_size = configured_window_size(&config);
 
         let mut app = Self {
             state: AppState {
                 profiles,
                 current_profile_name,
+                active_profile_name,
                 active_tab: Tab::Mappings,
                 theme: AppTheme::System,
                 close_to_tray: true,
@@ -1697,6 +1861,9 @@ impl JoyMapperApp {
                 battery_info,
                 auto_update: config.auto_update,
                 update_state: update_state.clone(),
+                window_size,
+                window_size_saved: window_size,
+                window_size_changed_at: None,
             },
             window_icon,
             sound_engine,
@@ -2150,11 +2317,51 @@ impl eframe::App for JoyMapperApp {
         // executable can be replaced. Save first: profiles live next to the exe.
         if updater::quit_requested() {
             self.state.save_to_disk();
+            self.state.persist_window_size();
             std::process::exit(0);
         }
 
         // Keep the sound engine's OutputStream alive for the dedicated audio thread.
         let _binding = &self.sound_engine;
+
+        // Remember the user's window size. eframe's own window persistence is
+        // off because close-to-tray exits the process directly; saving here also
+        // lets the first launch default to a content-tight width. Skip while the
+        // window is maximized/minimized so those states don't overwrite the
+        // normal size the user picked.
+        let (inner_rect, minimized, maximized, fullscreen) = ctx.input(|i| {
+            let viewport = i.viewport();
+            (
+                viewport.inner_rect,
+                viewport.minimized == Some(true),
+                viewport.maximized == Some(true),
+                viewport.fullscreen == Some(true),
+            )
+        });
+        if let Some(rect) = inner_rect {
+            if !minimized && !maximized && !fullscreen && rect.width() > 1.0 && rect.height() > 1.0
+            {
+                let size = [
+                    rect.width().round().max(MIN_WINDOW_WIDTH),
+                    rect.height().round().max(MIN_WINDOW_HEIGHT),
+                ];
+                if size != self.state.window_size {
+                    self.state.window_size = size;
+                    self.state.window_size_changed_at = Some(std::time::Instant::now());
+                    ctx.request_repaint_after(Duration::from_millis(500));
+                }
+                let resize_settled = self
+                    .state
+                    .window_size_changed_at
+                    .map_or(false, |since| since.elapsed() >= Duration::from_millis(500));
+                if resize_settled && self.state.window_size != self.state.window_size_saved {
+                    self.state.window_size_saved = self.state.window_size;
+                    self.state.window_size_changed_at = None;
+                    self.state.persist_window_size();
+                }
+            }
+        }
+
         // --- 1. WINDOW SYSTEM LOGIC ---
         // The tray process asks us to come back (tray click / "Show Mapper").
         if consume_show_ui_request() {
@@ -2191,6 +2398,7 @@ impl eframe::App for JoyMapperApp {
         if ctx.input(|i| i.viewport().close_requested()) && self.state.close_to_tray {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.state.save_to_disk();
+            self.state.persist_window_size();
 
             // The tray process keeps the single tray icon alive; only spawn
             // one when it is not running yet.
@@ -2200,6 +2408,24 @@ impl eframe::App for JoyMapperApp {
                 }
             }
             std::process::exit(0);
+        }
+
+        // A "switch profile" mapping step can fire in the input engine while
+        // this window is open. Follow it here so the selector and the table
+        // always show the profile whose mappings are actually being played.
+        let engine_profile = self.state.active_profile_name.lock().unwrap().clone();
+        if engine_profile != self.state.current_profile_name
+            && self.state.profiles.contains_key(&engine_profile)
+        {
+            self.state.current_profile_name = engine_profile;
+            let current_name = self.state.current_profile_name.clone();
+            for (name, profile) in self.state.profiles.iter_mut() {
+                profile.last_used = *name == current_name;
+            }
+            if let Some(profile) = self.state.profiles.get(&current_name) {
+                *self.state.active_mapping.lock().unwrap() = profile.mappings.clone();
+            }
+            ctx.request_repaint();
         }
 
         // --- EARLY RETURN WHEN HIDDEN TO TRAY ---
@@ -2393,9 +2619,16 @@ impl eframe::App for JoyMapperApp {
                 match self.state.active_tab {
                     Tab::Mappings => {
                         win11_card_frame(&colors).show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
+                            // One fixed row: the profile bar must never wrap onto a
+                            // second line, even with a long profile name. The combo
+                            // gets a bounded width instead of growing with its text.
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
                                 ui.label(egui::RichText::new("Profile").color(colors.muted));
                                 egui::ComboBox::from_id_source("profile_select")
+                                    .width(140.0)
+                                    .wrap(false)
                                     .selected_text(egui::RichText::new(&self.state.current_profile_name).color(colors.text))
                                     .show_ui(ui, |ui| {
                                         let names: Vec<_> = self.state.profiles.keys().cloned().collect();
@@ -2528,6 +2761,15 @@ impl eframe::App for JoyMapperApp {
                         };
                         let recording_name = self.state.recording_key.clone();
                         let recording_slot = self.state.recording_slot;
+                        // Sorted profile names for the "switch profile" assignment
+                        // submenu. Collected before the table borrows the mappings
+                        // mutably.
+                        let profile_names: Vec<String> = {
+                            let mut names: Vec<String> =
+                                self.state.profiles.keys().cloned().collect();
+                            names.sort_by_key(|name| name.to_lowercase());
+                            names
+                        };
 
                         win11_card_frame(&colors).show(ui, |ui| {
                             // Table header
@@ -2609,7 +2851,7 @@ impl eframe::App for JoyMapperApp {
                                         egui::Frame::none()
                                             .fill(row_fill)
                                             .rounding(egui::Rounding::same(6.0))
-                                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                            .inner_margin(egui::Margin::symmetric(8.0, 0.0))
                                             .show(ui, |ui| {
                                                 let (input_w, keys_w, action_w) = mapping_columns(ui);
                                                 let spacing = ui.spacing().item_spacing.x;
@@ -2800,6 +3042,39 @@ impl eframe::App for JoyMapperApp {
                                                                 });
 
                                                                 ui.separator();
+                                                                ui.menu_button("Switch profile", |ui| {
+                                                                    ui.set_min_width(200.0);
+                                                                    if ui
+                                                                        .button("Next profile (cycle)")
+                                                                        .on_hover_text(
+                                                                            "Each press switches to the next profile in alphabetical order, wrapping after the last one",
+                                                                        )
+                                                                        .clicked()
+                                                                    {
+                                                                        key_slots[idx] =
+                                                                            PROFILE_STEP_NEXT.to_string();
+                                                                        needs_save = true;
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if !profile_names.is_empty() {
+                                                                        ui.separator();
+                                                                        for name in &profile_names {
+                                                                            if ui
+                                                                                .button(format!("Switch to {}", name))
+                                                                                .clicked()
+                                                                            {
+                                                                                key_slots[idx] = format!(
+                                                                                    "{}{}",
+                                                                                    PROFILE_STEP_PREFIX, name
+                                                                                );
+                                                                                needs_save = true;
+                                                                                ui.close_menu();
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                });
+
+                                                                ui.separator();
                                                                 if ui.button("Clear loop key").clicked() {
                                                                     key_slots[idx] = "".to_string();
                                                                     needs_save = true;
@@ -2963,6 +3238,7 @@ fn start_hardware_threads(
     pressed_inputs: Arc<Mutex<HashMap<String, bool>>>,
     active_mapping: Arc<Mutex<HashMap<String, Vec<String>>>>,
     key_press_counter: Arc<AtomicU64>,
+    active_profile_name: Arc<Mutex<String>>,
     connection_start: Arc<Mutex<std::time::Instant>>,
     battery_info: Arc<Mutex<(u8, u8)>>,
     click_tx: Option<std::sync::mpsc::Sender<()>>,
@@ -3062,7 +3338,7 @@ fn start_hardware_threads(
                 current_pressed.insert("RS_RIGHT".to_string(), rx > 16000);
 
                 let mut lock = pressed_inputs.lock().unwrap();
-                let macro_map = active_mapping.lock().unwrap();
+                let mut macro_map = active_mapping.lock().unwrap();
 
                 // Pause = behave exactly as if the app was closed: no key
                 // simulation, no sound, no press counting. Raw controller input
@@ -3116,13 +3392,44 @@ fn start_hardware_threads(
                     let was_pressed = *lock.get(name).unwrap_or(&false);
                     if *is_pressed && !was_pressed {
                         if simulate {
-                            if let Some(keys_vec) = macro_map.get(name) {
+                            let keys_vec = macro_map.get(name).cloned();
+                            if let Some(keys_vec) = keys_vec {
                                 // Each new press advances the loop: press 1 fires
                                 // mapped keys 1, press 2 fires mapped keys 2, ...
                                 let next = loop_indices.entry(name.clone()).or_insert(0);
-                                if let Some(combo) = next_loop_key(keys_vec, next) {
-                                    press_key_combo(&combo, &key_press_counter);
-                                    held_combos.insert(name.clone(), combo);
+                                if let Some(combo) = next_loop_key(&keys_vec, next) {
+                                    if let Some(step) = profile_step(&combo) {
+                                        // A profile switch is a one-shot action:
+                                        // nothing is left held on the keyboard.
+                                        let current = active_profile_name.lock().unwrap().clone();
+                                        if let Some((target, mappings)) =
+                                            switch_profile(&step, &current)
+                                        {
+                                            *active_profile_name.lock().unwrap() = target.clone();
+                                            *macro_map = mappings;
+                                            if matches!(role, ProcessRole::Tray) {
+                                                let mut counter = TRAY_COUNTER.lock().unwrap();
+                                                if let Some((name, count)) = counter.as_mut() {
+                                                    if name != &target {
+                                                        // Keep the press count with the
+                                                        // profile we are leaving.
+                                                        persist_key_press_count(
+                                                            name,
+                                                            count.load(Ordering::Relaxed),
+                                                        );
+                                                        *name = target;
+                                                    }
+                                                }
+                                            }
+                                            if let Some(ref ctx) = ctx_poll {
+                                                ctx.request_repaint();
+                                            }
+                                        }
+                                        held_combos.insert(name.clone(), String::new());
+                                    } else {
+                                        press_key_combo(&combo, &key_press_counter);
+                                        held_combos.insert(name.clone(), combo);
+                                    }
                                 }
                             }
                             if sound_enabled.load(Ordering::SeqCst) {
@@ -3136,7 +3443,7 @@ fn start_hardware_threads(
                         // Release exactly the step that this press fired. Drop the
                         // bookkeeping even when we no longer own input.
                         if let Some(combo) = held_combos.remove(name) {
-                            if simulate {
+                            if simulate && !combo.is_empty() {
                                 release_key_combo(&combo);
                             }
                         }
@@ -3357,6 +3664,7 @@ fn run_tray_mode() {
         pressed_inputs,
         active_mapping,
         key_press_counter,
+        watched_profile_name,
         connection_start,
         battery_info,
         click_tx,
@@ -3472,17 +3780,19 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Without --ui, check config: start minimized → go straight to tray
+    // Without --ui, check config: start minimized → go straight to tray.
+    // The same config also supplies the remembered window size.
+    let config = load_config();
     let start_visible = if is_ui {
         true
     } else {
-        let config = load_config();
         if config.start_minimized {
             run_tray_mode();
             return Ok(());
         }
-        !config.start_minimized
+        true
     };
+    let window_size = configured_window_size(&config);
 
     // Validate auto-start task path if enabled (UI mode only)
     if autostart::is_enabled() {
@@ -3518,12 +3828,14 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 640.0])
-            .with_min_inner_size([620.0, 520.0])
+            .with_inner_size(window_size)
+            .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
             .with_decorations(true)
             .with_transparent(true)
             .with_visible(start_visible),
-        persist_window: true,
+        // Window geometry is persisted in config.json instead: close-to-tray
+        // exits the process directly, so eframe never gets a chance to save it.
+        persist_window: false,
         ..Default::default()
     };
 
@@ -3717,5 +4029,55 @@ mod loop_key_tests {
         assert_eq!(key_token(egui::Key::Colon).as_deref(), Some(";"));
         assert_eq!(key_token(egui::Key::Semicolon).as_deref(), Some(";"));
         assert_eq!(key_token(egui::Key::Escape), None);
+    }
+
+    #[test]
+    fn profile_steps_are_parsed_and_labelled() {
+        assert_eq!(profile_step("@profile_next"), Some(ProfileStep::Next));
+        assert_eq!(profile_step("@PROFILE_NEXT"), Some(ProfileStep::Next));
+        assert_eq!(
+            profile_step("@profile:Gaming"),
+            Some(ProfileStep::Switch("Gaming".to_string()))
+        );
+        assert_eq!(
+            profile_step("  @profile: Work + Play  "),
+            Some(ProfileStep::Switch("Work + Play".to_string()))
+        );
+        assert_eq!(profile_step("@profile:"), None);
+        assert_eq!(profile_step("ctrl+s"), None);
+
+        assert_eq!(format_key_combo("@profile:Gaming"), "Profile: Gaming");
+        assert_eq!(format_key_combo("@profile_next"), "Next profile");
+        assert_eq!(profile_step_label("ctrl+s"), None);
+    }
+
+    #[test]
+    fn profile_cycle_wraps_alphabetically() {
+        let names = vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()];
+        assert_eq!(next_profile_name(&names, "Alpha").as_deref(), Some("Beta"));
+        assert_eq!(next_profile_name(&names, "Gamma").as_deref(), Some("Alpha"));
+        assert_eq!(
+            next_profile_name(&names, "Unknown").as_deref(),
+            Some("Beta")
+        );
+        assert_eq!(next_profile_name(&[], "Alpha"), None);
+    }
+
+    #[test]
+    fn window_size_defaults_to_content_and_clamps_saved_value() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            configured_window_size(&config),
+            [DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT]
+        );
+
+        config.window_size = Some([100.0, 100.0]);
+        assert_eq!(
+            configured_window_size(&config),
+            [MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT]
+        );
+
+        config.window_size = Some([820.0, 700.0]);
+        assert_eq!(configured_window_size(&config), [820.0, 700.0]);
     }
 }

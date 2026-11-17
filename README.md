@@ -17,15 +17,17 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 | 🎮 **Full XInput** | All 24 inputs: A/B/X/Y, D-pad, bumpers, triggers (analog→digital), thumbstick clicks + 4 directions each, Start/Back/Guide |
 | ⌨️ **Loop Key Cycles** | Give an input up to **10 loop steps**. Each press fires the next step and wraps around: steps `L` → `O` produce `LOLOLO...`. Every step is a colour-coded pill (`1` blue, `2` green, `3` yellow, `4` red, `5` purple) and a whole combo such as `Ctrl + Shift + S` stays in **one** pill/step |
 | 🔢 **Numpad Support** | Distinct VK_NUMPAD0–9, VK_ADD/SUBTRACT/MULTIPLY/DIVIDE/DECIMAL — games and DAWs see real numpad keystrokes |
-| 📝 **Live Recording** | Click any pill, press the keyboard combo you want — instant assign to that **one loop step**. Escape cancels. |
-| 🖱️ **Categorized Context Menus** | Right-click any cell for: Letters A–M, Letters N–Z, Numbers 0–9, Symbols & Brackets, Modifiers & Controls, Function Keys |
+| 📝 **Live Recording** | Click any pill, hold the key or combo, then **release all keys** to confirm — assigned to that **one loop step**. Combos can be **any 2–3 keys**, not just modifiers (`K + L`, `E + J`, `, + 0`, `Ctrl + Shift + S`). Escape cancels. |
+| 🖱️ **Categorized Context Menus** | Right-click any cell for: Letters A–M, Letters N–Z, Numbers 0–9, Symbols & Brackets, Modifiers & Controls, Function Keys, plus **Switch profile** |
 | 📂 **Per-Profile Files** | Each profile = one `.json` file in the exe directory. Copy, share, or edit them directly. No AppData, no registry bloat. |
 | 🔄 **Profile Management** | Switch, New, Rename, Delete, Import, Export — all self-contained in the exe folder |
+| 🔀 **Profile Switch Actions** | Map any controller input or loop step to **Switch profile** → a specific profile, or **Next profile (cycle)** to rotate through profiles alphabetically. The window selector follows the switch live |
 | ⭐ **Last-Used Priority** | Profiles carry a `last_used` flag; the app restores the last-active profile on startup |
 | 🖼️ **System Tray** | The default mode hides to tray on launch (`start_minimized`). **Exactly one tray icon at any time** — it is owned solely by the tray process, so opening/closing the window never adds or removes an icon. Two process modes: `--tray` (pure Win32, ~2 MB RAM) and `--ui` (full egui window, spawned on demand). RAM freed entirely when window closes. Three custom tray icons (disconnected, ready, pressing). |
 | ⏸️ **Real Pause** | Pause makes the app behave exactly as if it were closed: **zero** `SendInput` calls, no sound, no key counting. Controller input is left completely untouched so other programs receive it normally. Keys held at the moment of pausing are released (nothing gets stuck). Available from the toolbar button, the Settings tab and the tray context menu, and the state is persisted in `config.json`. |
 | 🔊 **Sound Feedback** | Plays a click on button press via a dedicated audio thread — works even while window is hidden (trayed) |
 | 🎨 **Win11 Mica Backdrop** | Translucent acrylic-style background using `window-vibrancy` + DwmSetWindowAttribute |
+| 🪟 **Content-Tight Window** | Opens at a width that fits the profile toolbar and mapping table, and remembers the size you resize it to |
 | 🌓 **Theme Support** | System (auto-dark/light via registry), Dark, Light |
 | 🚀 **Startup Launch** | Optional silent launch on Windows startup via `HKCU\...\Run` |
 | 🔄 **Auto-Update** | Checks the public release feed once a day, asks before installing, then replaces the exe and restarts automatically. Manual check in Settings → Updates or from the tray menu. |
@@ -73,15 +75,16 @@ Just unzip and run `joymapper_rust.exe` — no installer needed.
 1. **Launch the app** — by default it starts minimized to the system tray (lightweight `--tray` mode, ~2 MB RAM). Right-click the tray icon → *Show Mapper* or left-click to open the full UI.
 2. **Plug in an XInput controller** — the status indicator in the status bar turns green
 3. **Map your buttons**:
-   - **Click a pill** → it turns amber → press the desired key or combo → instantly assigned to that loop step ✨
+   - **Click a pill** → it turns amber → hold the key or combo → **release all keys** to confirm. The banner previews the captured combo while you hold it; nothing is saved until every key is released, so `Ctrl` then `S` becomes `Ctrl + S` instead of stopping at `Ctrl`. Any keys combine, modifiers or not — `K + L`, `E + J`, `, + 0` and three-key combos all work. Escape cancels.
    - **Right-click** any pill for the **categorized context menu** (Letters, Numbers, Symbols, Modifiers, F-Keys)
+   - **Right-click → Switch profile** to make that controller input (or loop step) switch profiles instead of sending a key: pick a target profile, or *Next profile (cycle)* to rotate alphabetically on every press
    - Click **New Loop keys** in the Action column to add another loop step (up to 10 per input). Each new press of the controller button fires the next step: `1 → 2 → 3 → 1 → …`
    - Click **Reset** to reset the input to a single empty loop step
 
    **Pills:** the numbered circle shows the loop order. Colours follow `1` blue, `2` green, `3` yellow, `4` red, `5` purple, then repeat. A pill holds either one key (`L`) or a whole combo (`Ctrl + Shift + S`); a combo is always **one** step, never split into `1`/`2`.
 
    **Loop example:** map `A` to step 1 = `l` and step 2 = `o`. Pressing A repeatedly types `LOLOLO…`.
-4. **Switch profiles** via the dropdown in the toolbar
+4. **Switch profiles** via the dropdown in the toolbar — or map a controller button to do it from the pill's right-click menu
 5. **Import/Export, New, Rename, Delete** profiles from the toolbar
 6. **Settings tab**: toggle tray-on-close, startup launch, sound, and theme
 
