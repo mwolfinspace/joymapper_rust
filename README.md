@@ -33,7 +33,7 @@ Map every button, trigger, and thumbstick direction on your XInput gamepad to ke
 | 🔄 **Auto-Update** | Checks the public release feed once a day, asks before installing, then replaces the exe and restarts automatically. Manual check in Settings → Updates or from the tray menu. |
 | 🗑️ **Clear Mapping** | Reset button in the Action column resets any input to a single unmapped loop step |
 | 👁️ **Row Highlight** | Full-width blue tint highlights the entire row when a controller button is pressed |
-| ⚡ **250 Hz Polling** | High-precision Windows timer (`timeBeginPeriod(1)`) for near-instant input response |
+| ⚡ **4 ms Poll Loop** | `XInputGetState` is polled every 4 ms while a controller is active, 16 ms after 10 minutes of idling, and 2 s while disconnected |
 
 ---
 
@@ -106,9 +106,21 @@ The tray icon has a **single owner**: the `--tray` process. The `--ui` process n
 |---|---|
 | **Show Mapper** | Restores/focuses the running window, or spawns a new `--ui` instance |
 | **Pause mapping / Resume mapping** | Toggles the same persisted pause state as the toolbar button |
+| **Reconnect Controller** | Re-initialises XInput (greyed out while the window owns input — use Settings → Hardware instead) |
+| **Check for Updates...** | Runs an update check without opening the window |
 | **Exit Program** | Saves the key-press counter and terminates the app |
 
 Left-click or double-click the icon also shows the mapper.
+
+### 🔌 Bluetooth controller stops responding
+
+Windows can keep reporting a Bluetooth pad as connected long after its HID link stopped delivering reports — `HidBth` logs *"Bluetooth HID device either went out of range or became unresponsive"*. XInput returns the last known state, so the status stays green and **no application** (including browser Gamepad testers) sees buttons, while Device Manager still lists the device. It is not a JoyMapper bug.
+
+- **Fix the cause**: Device Manager → Bluetooth → your controller → *Properties → Power Management* → uncheck *"Allow the computer to turn off this device to save power"*. Repeat for *Human Interface Devices → Bluetooth XINPUT compatible input device*. Also update the controller firmware.
+- **Recover without unplugging**: Settings → Hardware → *Reconnect controller* (or the tray menu entry). It re-initialises XInput and sends a zero-vibration output report to nudge the link.
+- **If it still will not answer**: switch the controller's mode or unplug/replug it. That re-enumerates the device at the OS level, which software cannot do for a stalled Bluetooth link.
+
+The Hardware card also shows *"Last input change: Ns ago"* — that value is driven by XInput's packet counter and only advances when the pad's state actually changes, so a held-but-steady button will let it grow.
 
 ### ⏸️ Pause vs. Close
 
@@ -239,7 +251,7 @@ Key design: the egui/eframe process **does not stay alive** when the window is h
 
 ### 🔁 Single Input Owner
 
-Both processes poll XInput (each needs its own state for status display, battery and row highlighting), but **only one of them may translate input into keystrokes** — otherwise a single button press would be sent twice while the window is open:
+Both processes poll XInput while they own the input engine, and **only one of them may translate input into keystrokes** — otherwise a single button press would be sent twice while the window is open. The tray process drops to a 1 Hz mirror read while the UI process owns input, so the controller is never polled at full rate by two processes at once:
 
 | Process | Tray icon | Simulates keys |
 |---|---|---|
@@ -255,7 +267,7 @@ The tray process also watches the profile files on disk, so mappings edited in t
 |---|---|
 | **Main** | Sleeps (idle); wakes only on tray icon messages |
 | **Win32 message pump** | Hidden HWND_MESSAGE window, processes tray icon events |
-| **Polling** | XInputGetState loop (20 Hz active, 5 Hz idle, 2 s disconnected), fires `SendInput` + sound + tray updates. For loop-key arrays: each press advances to the next step, key-down in order and key-up in reverse for that step only. |
+| **Polling** | XInputGetState loop (4 ms active, 16 ms after 10 min idle, 2 s disconnected; 1 s mirror read while the UI process owns input), fires `SendInput` + sound + tray updates. For loop-key arrays: each press advances to the next step, key-down in order and key-up in reverse for that step only. |
 | **Sound** | Decodes and plays click via rodio; receives triggers via `mpsc` channel |
 | **Bluetooth battery** | Polls Bluetooth battery every 30 s |
 

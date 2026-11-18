@@ -43,6 +43,15 @@ static UI_ACTIVE_EVENT: AtomicUsize = AtomicUsize::new(0);
 // menu can persist the counter on exit.
 static TRAY_COUNTER: Mutex<Option<(String, Arc<AtomicU64>)>> = Mutex::new(None);
 
+// Last time XInput's `dwPacketNumber` changed, i.e. the last time the pad
+// actually reported something. XInput keeps answering "connected" with the last
+// known state after a Bluetooth link stalls, so this is the only honest way for
+// the window to tell "idle" apart from "the controller stopped talking".
+static LAST_CONTROLLER_INPUT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+// Set by the UI or the tray menu; the polling thread re-initialises XInput.
+static RECONNECT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 // --- MASTER CONTROLLER LAYOUT ---
 // This guarantees a logical display order and ensures no buttons are ever missing.
 const DIGITAL_MAP: &[(&str, u16)] = &[
@@ -409,7 +418,10 @@ fn next_loop_key(keys_vec: &[String], next_index: &mut usize) -> Option<String> 
     None
 }
 
-fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) {
+/// Returns `(connected, packet_number, buttons, lx, ly, rx, ry, lt, rt)`.
+/// `dwPacketNumber` only advances when the controller's state actually changes,
+/// so it doubles as a "the link is still delivering reports" heartbeat.
+fn check_controller_full(index: u32) -> (bool, u32, u16, i16, i16, i16, i16, u8, u8) {
     unsafe {
         use windows_sys::Win32::UI::Input::XboxController::*;
         let mut state: XINPUT_STATE = std::mem::zeroed();
@@ -418,6 +430,7 @@ fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) 
             let gp = state.Gamepad;
             (
                 true,
+                state.dwPacketNumber,
                 gp.wButtons,
                 gp.sThumbLX,
                 gp.sThumbLY,
@@ -427,9 +440,18 @@ fn check_controller_full(index: u32) -> (bool, u16, i16, i16, i16, i16, u8, u8) 
                 gp.bRightTrigger,
             )
         } else {
-            (false, 0, 0, 0, 0, 0, 0, 0)
+            (false, 0, 0, 0, 0, 0, 0, 0, 0)
         }
     }
+}
+
+/// Ask the input engine to drop XInput's cached device state. This is the
+/// software equivalent of unplugging the pad: Windows can keep reporting a
+/// Bluetooth controller as connected (and JoyMapper keeps showing green) long
+/// after `HidBth` logged that the device "became unresponsive", and only a
+/// re-initialisation clears that state.
+fn request_controller_reconnect() {
+    RECONNECT_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 fn query_xinput_battery(index: u32) -> (u8, u8) {
@@ -1508,6 +1530,19 @@ unsafe extern "system" fn tray_wnd_proc(
                         .collect()
                 };
                 AppendMenuW(hmenu, MF_STRING, 103, pause_label.as_ptr());
+                // Only the process that owns key simulation can re-initialise
+                // XInput, so grey the entry out while the window is up.
+                let reconnect_flags = if ui_process_active() {
+                    MF_STRING | MF_GRAYED
+                } else {
+                    MF_STRING
+                };
+                AppendMenuW(
+                    hmenu,
+                    reconnect_flags,
+                    105,
+                    windows_sys::w!("Reconnect Controller"),
+                );
                 AppendMenuW(
                     hmenu,
                     MF_STRING,
@@ -1578,6 +1613,7 @@ unsafe extern "system" fn tray_wnd_proc(
             103 => {
                 toggle_paused();
             }
+            105 => request_controller_reconnect(),
             104 => {
                 // Never block the tray message loop: the check does network
                 // I/O and the prompt is modal to this thread.
@@ -2156,7 +2192,7 @@ impl JoyMapperApp {
                     "Connected - controller active through XInput",
                 );
                 ui.label(
-                    egui::RichText::new("Controller 0 | polling at 1000 Hz | XInput engine")
+                    egui::RichText::new("Controller 0 | 4 ms XInput poll loop")
                         .color(colors.muted),
                 );
                 let elapsed = self.state.connection_start.lock().unwrap().elapsed();
@@ -2213,6 +2249,46 @@ impl JoyMapperApp {
                     ui.colored_label(color, format!("Battery: {} (wireless)", level_str));
                 } else {
                     ui.label("Battery: unknown");
+                }
+
+                // XInput keeps answering "connected" after a Bluetooth link
+                // stalls, so show how old the last real report is and offer the
+                // same reset an unplug/replug performs.
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+                ui.add_space(4.0);
+                match *LAST_CONTROLLER_INPUT.lock().unwrap() {
+                    Some(at) => {
+                        let secs = at.elapsed().as_secs();
+                        ui.label(
+                            egui::RichText::new(format!("Last input change: {}s ago", secs))
+                                .color(colors.muted),
+                        );
+                        if secs >= 60 {
+                            ui.label(
+                                egui::RichText::new(
+                                    "No input for a while. If buttons do nothing, the Bluetooth link stalled - reconnect the controller.",
+                                )
+                                .small()
+                                .color(colors.warning),
+                            );
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("No controller input yet - press any button")
+                                .color(colors.muted),
+                        );
+                    }
+                }
+                if ui
+                    .button("Reconnect controller")
+                    .on_hover_text(
+                        "Re-initialise XInput. Same effect as unplugging and replugging the pad.",
+                    )
+                    .clicked()
+                {
+                    request_controller_reconnect();
+                    *LAST_CONTROLLER_INPUT.lock().unwrap() = None;
                 }
             } else {
                 ui.colored_label(colors.danger, "Disconnected - no controller detected");
@@ -2581,7 +2657,11 @@ impl eframe::App for JoyMapperApp {
                                     ui.colored_label(status_color, "o");
                                     ui.label(egui::RichText::new(status_text).color(colors.text));
                                 });
-                            });
+                            })
+                            .response
+                            .on_hover_text(
+                                "Windows reports the controller as connected even when its Bluetooth link has stopped delivering input. If buttons do nothing, use Settings > Hardware > Reconnect controller.",
+                            );
                     });
                 });
 
@@ -2622,6 +2702,14 @@ impl eframe::App for JoyMapperApp {
             .show(ctx, |ui| {
                 match self.state.active_tab {
                     Tab::Mappings => {
+                        if std::env::var_os("JOYMAPPER_DEBUG_LAYOUT").is_some() {
+                            eprintln!(
+                                "DEBUG screen={:?} ppp={} central_avail={}",
+                                ctx.screen_rect(),
+                                ctx.pixels_per_point(),
+                                ui.available_width()
+                            );
+                        }
                         win11_card_frame(&colors).show(ui, |ui| {
                             // One fixed row: the profile bar must never wrap onto a
                             // second line, even with a long profile name. The combo
@@ -2791,6 +2879,12 @@ impl eframe::App for JoyMapperApp {
                                 .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                                 .show(ui, |ui| {
                                     let (input_w, keys_w, action_w) = mapping_columns(ui);
+                                    if std::env::var_os("JOYMAPPER_DEBUG_LAYOUT").is_some() {
+                                        eprintln!(
+                                            "DEBUG header avail={} input={} keys={} action={}",
+                                            ui.available_width(), input_w, keys_w, action_w
+                                        );
+                                    }
                                     let spacing = ui.spacing().item_spacing.x;
                                     ui.horizontal(|ui| {
                                         ui.allocate_ui_with_layout(
@@ -2866,6 +2960,14 @@ impl eframe::App for JoyMapperApp {
                                             .inner_margin(egui::Margin::symmetric(8.0, 0.0))
                                             .show(ui, |ui| {
                                                 let (input_w, keys_w, action_w) = mapping_columns(ui);
+                                                if row_idx == 0
+                                                    && std::env::var_os("JOYMAPPER_DEBUG_LAYOUT").is_some()
+                                                {
+                                                    eprintln!(
+                                                        "DEBUG row0 avail={} input={} keys={} action={}",
+                                                        ui.available_width(), input_w, keys_w, action_w
+                                                    );
+                                                }
                                                 let spacing = ui.spacing().item_spacing.x;
                                                 // Bound the row to ROW_HEIGHT: a child that
                                                 // centres itself in "the rest of the space"
@@ -3264,6 +3366,10 @@ fn start_hardware_threads(
         const FAST_MS: u64 = 4;
         const SLOW_MS: u64 = 16;
         const DISCONNECTED_POLL_MS: u64 = 2000;
+        // While the UI process owns key simulation this process only mirrors the
+        // connection state for the tray icon, so one read per second is plenty
+        // and halves the XInput traffic.
+        const MIRROR_MS: u64 = 1000;
         const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
         const DISCONNECT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -3274,13 +3380,60 @@ fn start_hardware_threads(
         let mut last_tray_update = std::time::Instant::now();
         let mut last_battery_query = std::time::Instant::now() - Duration::from_secs(30);
         let mut was_paused = false;
+        // Last packet number seen, used as the "controller is still talking" beat.
+        let mut last_packet: Option<u32> = None;
+        // Tray mode only: is the UI process currently owning key simulation?
+        // Checked twice a second instead of on every poll iteration.
+        let mut ui_alive = false;
+        let mut last_ui_check = std::time::Instant::now() - Duration::from_secs(1);
         // Per-input loop cursor: which mapped-key step the next press fires.
         let mut loop_indices: HashMap<String, usize> = HashMap::new();
         // The combo actually pressed for each held input, so release only sends
         // key-ups for keys we sent key-downs for.
         let mut held_combos: HashMap<String, String> = HashMap::new();
         loop {
-            let (connected, buttons, lx, ly, rx, ry, lt, rt) = check_controller_full(0);
+            if matches!(role, ProcessRole::Tray)
+                && last_ui_check.elapsed() >= Duration::from_millis(500)
+            {
+                ui_alive = ui_process_active();
+                last_ui_check = std::time::Instant::now();
+            }
+
+            // The UI or the tray menu asked for a fresh XInput instance.
+            if RECONNECT_REQUESTED.swap(false, Ordering::SeqCst) {
+                {
+                    use windows_sys::Win32::UI::Input::XboxController::*;
+                    unsafe {
+                        XInputEnable(0);
+                        std::thread::sleep(Duration::from_millis(150));
+                        // Nudge the link with a zero-vibration output report: it
+                        // is the only packet XInput can still send to a stalled pad.
+                        let vibration: XINPUT_VIBRATION = std::mem::zeroed();
+                        XInputSetState(0, &vibration);
+                        XInputEnable(1);
+                    }
+                }
+                last_packet = None;
+                *LAST_CONTROLLER_INPUT.lock().unwrap() = None;
+                if let Some(ref ctx) = ctx_poll {
+                    if UI_VISIBLE.load(Ordering::Relaxed) {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+
+            let (connected, packet, buttons, lx, ly, rx, ry, lt, rt) = check_controller_full(0);
+
+            // `dwPacketNumber` advances only on a real input change, so it is the
+            // honest "last time the pad reported something" timestamp.
+            if connected {
+                if last_packet != Some(packet) {
+                    last_packet = Some(packet);
+                    *LAST_CONTROLLER_INPUT.lock().unwrap() = Some(std::time::Instant::now());
+                }
+            } else {
+                last_packet = None;
+            }
 
             if connected != was_connected {
                 *connected_poll.lock().unwrap() = connected;
@@ -3315,7 +3468,9 @@ fn start_hardware_threads(
             }
 
             let ui_visible = UI_VISIBLE.load(Ordering::Relaxed);
-            let target = if connected {
+            let target = if matches!(role, ProcessRole::Tray) && ui_alive {
+                MIRROR_MS
+            } else if connected {
                 let is_idle = last_activity.elapsed() >= IDLE_TIMEOUT;
                 if is_idle {
                     SLOW_MS
@@ -3358,7 +3513,7 @@ fn start_hardware_threads(
                 let paused = PAUSED.load(Ordering::SeqCst);
                 let owns_input = match role {
                     ProcessRole::Ui => true,
-                    ProcessRole::Tray => !ui_process_active(),
+                    ProcessRole::Tray => !ui_alive,
                 };
                 let simulate = owns_input && !paused;
 
@@ -3783,7 +3938,7 @@ fn main() -> eframe::Result<()> {
 
     // Self-elevate to admin (skipped in --tray mode: the UI process already
     // spawns --tray while elevated, so re-elevating would show a spurious UAC)
-    if !is_tray && !admin::is_admin() {
+    if !is_tray && !admin::is_admin() && std::env::var_os("JOYMAPPER_NO_ELEVATE").is_none() {
         admin::self_elevate();
     }
 
